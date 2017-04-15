@@ -6,12 +6,13 @@
 
 #include "pages.h"
 #include <libcmk/button.h>
+#include <libcmk/cmk-icon.h>
 
 struct _PageHome
 {
 	CmkWidget parent;
 	
-	CmkWidget *logo;
+	CmkIcon *logo;
 	CmkButton *nextButton;
 };
 
@@ -37,9 +38,8 @@ static void next_page(PageHome *self)
 
 static void page_home_init(PageHome *self)
 {
-	//self->logo = cmk_widget_new();
-	//cmk_widget_set_background_color_name(logo, "accent");
-	//clutter_actor_add_child(CLUTTER_ACTOR(bg), CLUTTER_ACTOR(logo));
+	self->logo = cmk_icon_new_full("velt", "Velt", 256, FALSE);
+	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->logo));
 
 	self->nextButton = cmk_button_new_full("Begin Installation", CMK_BUTTON_TYPE_BEVELED);
 	g_signal_connect_swapped(self->nextButton, "activate", G_CALLBACK(next_page), self);
@@ -57,14 +57,25 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 	gfloat minW, minH, natW, natH;
 	clutter_actor_get_preferred_size(CLUTTER_ACTOR(self->nextButton), &minW, &minH, &natW, &natH);
 	
+	gfloat logoSize;
+	clutter_actor_get_preferred_width(CLUTTER_ACTOR(self->logo), -1, NULL, &logoSize);
+
 	ClutterActorBox nextButton = {
 		width/2 - natW/2,
-		height*2/3 - natH/2,
+		height*3/4 - natH/2,
 		width/2 + natW/2,
-		height*2/3 + natH/2
+		height*3/4 + natH/2
+	};
+	
+	ClutterActorBox logo = {
+		width/2 - logoSize/2,
+		height*1/3 - logoSize/2,
+		width/2 + logoSize/2,
+		height*1/3 + logoSize/2
 	};
 
 	clutter_actor_allocate(CLUTTER_ACTOR(self->nextButton), &nextButton, flags);
+	clutter_actor_allocate(CLUTTER_ACTOR(self->logo), &logo, flags);
 
 	CLUTTER_ACTOR_CLASS(page_home_parent_class)->allocate(self_, box, flags);
 }

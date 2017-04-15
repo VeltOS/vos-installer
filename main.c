@@ -14,7 +14,7 @@ static const ClutterColor GrapheneColors[] = {
 	{255, 255, 255, 204}, // foreground (font)
 	{255, 255, 255, 40}, // hover
 	{255, 255, 255, 25}, // selected
-	{208, 37, 37, 255}, // accent (vosred, #906565)
+	{208, 39, 39, 255}, // accent (vosred, #D02727)
 };
 
 static const float GrapheneBevelRadius = 3.0;

@@ -88,7 +88,8 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 
 	gfloat hminH, hnatH;
 	clutter_actor_get_preferred_height(CLUTTER_ACTOR(self->helpLabel), width, &hminH, &hnatH);
-
+	// hnatH *= cmk_widget_style_get_scale_factor(CMK_WIDGET(self->helpLabel));
+	
 	float pad = cmk_widget_style_get_padding(CMK_WIDGET(self))*3;
 	
 	ClutterActorBox nextButton = {
@@ -100,9 +101,9 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 
 	ClutterActorBox help = {
 		pad,
-		pad,
+		pad*2,
 		width-pad,
-		pad+hnatH
+		pad*2+hnatH
 	};
 
 	ClutterActorBox b = {0,0,width,height};
