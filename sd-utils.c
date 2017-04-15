@@ -213,4 +213,5 @@ StorageDevice * copy_storage_device(const StorageDevice *device)
 	copy->removable = device->removable;
 	copy->efi = device->efi;
 	copy->userdata = device->userdata;
+	return copy;
 }
