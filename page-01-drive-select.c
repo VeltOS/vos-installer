@@ -6,10 +6,7 @@
 
 #include "pages.h"
 #include "sd-utils.h"
-#include <libcmk/button.h>
-#include <libcmk/cmk-scroll-box.h>
-#include <libcmk/cmk-icon.h>
-#include <libcmk/cmk-label.h>
+#include <libcmk/cmk.h>
 #include <string.h>
 
 struct _PageDriveSelect
