@@ -44,9 +44,6 @@ static void page_drive_select_class_init(PageDriveSelectClass *class)
 static void page_drive_select_init(PageDriveSelect *self)
 {
 	cmk_focus_on_mapped(CLUTTER_ACTOR(self));
-
-	self->helpLabel = cmk_label_new_with_text("Please select a drive to install VeltOS on. All contents of the selected drive will be erased!");
-	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->helpLabel));
 	
 	self->driveListBox = cmk_scroll_box_new(CLUTTER_SCROLL_HORIZONTALLY);
 	ClutterBoxLayout *listLayout = CLUTTER_BOX_LAYOUT(clutter_box_layout_new());
@@ -55,6 +52,10 @@ static void page_drive_select_init(PageDriveSelect *self)
 	clutter_actor_set_x_align(CLUTTER_ACTOR(self->driveListBox), CLUTTER_ACTOR_ALIGN_CENTER);
 	clutter_actor_set_layout_manager(CLUTTER_ACTOR(self->driveListBox), CLUTTER_LAYOUT_MANAGER(listLayout));
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->driveListBox));
+
+	self->helpLabel = cmk_label_new_full("Please select a drive to install VeltOS on. All contents of the selected drive will be erased!", 1, TRUE);
+	cmk_label_set_line_alignment(self->helpLabel, PANGO_ALIGN_CENTER);
+	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->helpLabel));
 	
 	self->driveMonitor = monitor_storage_devices(
 		(StorageDeviceAddedCb)on_drive_added,
@@ -82,15 +83,13 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 
 	gfloat width = clutter_actor_box_get_width(box);
 	gfloat height = clutter_actor_box_get_height(box);
+	gfloat pad = cmk_widget_style_get_padding(CMK_WIDGET(self))*3;
 
 	gfloat minW, minH, natW, natH;
 	clutter_actor_get_preferred_size(CLUTTER_ACTOR(self->nextButton), &minW, &minH, &natW, &natH);
 
 	gfloat hminH, hnatH;
-	clutter_actor_get_preferred_height(CLUTTER_ACTOR(self->helpLabel), width, &hminH, &hnatH);
-	// hnatH *= cmk_widget_style_get_scale_factor(CMK_WIDGET(self->helpLabel));
-	
-	float pad = cmk_widget_style_get_padding(CMK_WIDGET(self))*3;
+	clutter_actor_get_preferred_height(CLUTTER_ACTOR(self->helpLabel), width-pad*2, &hminH, &hnatH);
 	
 	ClutterActorBox nextButton = {
 		width-pad - natW,

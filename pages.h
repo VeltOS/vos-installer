@@ -20,7 +20,7 @@ CmkWidget * page_drive_select_new();
 G_DECLARE_FINAL_TYPE(PageProfile, page_profile, PAGE, PROFILE, CmkWidget);
 CmkWidget * page_profile_new();
 
-G_DECLARE_FINAL_TYPE(PageComplete, page_compplete, PAGE, COMPLETE, CmkWidget);
+G_DECLARE_FINAL_TYPE(PageComplete, page_complete, PAGE, COMPLETE, CmkWidget);
 CmkWidget * page_complete_new();
 
 G_END_DECLS
