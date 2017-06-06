@@ -27,5 +27,6 @@ target_link_libraries(vos-install-gui
 	m
 )
 
-add_subdirectory(/home/aidan/cmk /home/aidan/cmk/build)
-add_dependencies(vos-install-gui cmk)
+add_subdirectory(/home/aidan/projects/cmk /home/aidan/projects/cmk/build)
+add_subdirectory(cli)
+add_dependencies(vos-install-gui vos-install-cli cmk)
