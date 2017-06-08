@@ -15,6 +15,7 @@ target_include_directories(vos-install-cli PRIVATE
 	${GIO_INCLUDE_DIRS}
 )
 target_link_libraries(vos-install-cli
+	SegFault
 	${GLIB_LIBRARIES}
 	${GIO_LIBRARIES}
 )

@@ -22,18 +22,22 @@
  * -p  --password  The password of the default user account, and
  *                   the password for the root account. Set NONE/blank STDIN
  *                   for automatic login.
- * -l  --locale    The system locale, or NONE/blank STDIN to not set.
+ * -l  --locale    The system locale, or NONE/blank STDIN to default
+ *                   to "en_US.UTF-8". This functions as a prefix; setting
+ *                   the argument to "en" would enable all english locales.
+ *                   The first match is used to set the LANG variable.
  * -z  --zone      The timeline file, relative to /usr/share/zoneinfo.
- *                   NONE/blank STDIN to not set.
+ *                   NONE/blank STDIN to use /usr/share/zoneinfo/UTC.
  * -k  --packages  A list of extra packages to install along with
  *                   base. Package names should be separated by spaces.
  *                   NONE/blank STDIN for no extra packages.
+ *                   If sudo is specified among the list of packages, the
+ *                   wheel group will automatically be enabled for sudo.
  * -s  --services  A list of systemd services to enable in the installed
  *                   arch, separated by spaces. Or NONE/blank STDIN for no
  *                   extra services.
- * -v  --verbose   Set for extra output. This must be on command line args.
  *
- * All arguments (except --verbose) can be passed over STDIN in the
+ * All arguments an be passed over STDIN in the
  * form ^<argname>=<value>$ where ^ means start of line and $ means
  * end of line (regex!). So, to set the password, you could pipe
  * \npassword=bad_password\n. An argument can only be set once; any
@@ -47,8 +51,8 @@
  *
  * 1) Mounts volume <dest> at <mount>
  * 2) $ pacstrap <mount> base <packages>
- * 3) Changes root into <mount>
- * 4) $ genfstab / >> /etc/fstab
+ * 3) $ genfstab <mount> >> <mount>/etc/fstab
+ * 4) Changes root into <mount>
  * 5) $ passwd <password>
  * 6) Updates locale.gen with <locale> and $ locale-gen
  * 7) $ ln -s /usr/share/zoneinfo/<zone> /etc/localtime
@@ -86,7 +90,6 @@ static struct argp_option options[] =
 	{"zone",      'z', "file",      0, "Timezone file (relative to /usr/share/zoneinfo/)"},
 	{"packages",  'k', "packages",  0, "List of extra packages separated by spaces"},
 	{"services",  's', "services",  0, "List of systemd services to enable"},
-	{"verbose",   'v',              0, 0, "Be verbose"},
 	{0}
 };
 
@@ -94,7 +97,7 @@ const char *argp_program_version = "vos-install-cli 0.1";
 const char *argp_program_bug_address = "Aidan Shafran <zelbrium@gmail.com>";
 static char argp_program_doc[] = "An installer for VeltOS (Arch Linux). See top of main.c for detailed instructions on how to use the installer. The program author is not responsible for any damages, including but not limited to exploded computer, caused by this program. Use as root and with caution.";
 
-const guint kMaxSteps = 4;
+const guint kMaxSteps = 12;
 
 typedef struct
 {
@@ -107,12 +110,12 @@ typedef struct
 	gchar *zone;
 	gchar *packages;
 	gchar *services;
-	gboolean verbose;
 	
 	// Running data
 	GCancellable *cancellable;
 	guint steps;
 	gchar *mountPath;
+	gboolean enableSudoWheel;
 } Data;
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state);
@@ -121,6 +124,12 @@ static gint mount_volume(Data *d);
 static gint run_pacstrap(Data *d);
 static gint run_genfstab(Data *d);
 static gint run_chroot(Data *d);
+static gint set_passwd(Data *d);
+static gint set_locale(Data *d);
+static gint set_zone(Data *d);
+static gint set_hostname(Data *d);
+static gint create_user(Data *d);
+static gint enable_services(Data *d);
 
 
 int main(int argc, char **argv)
@@ -171,7 +180,6 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'z': d->zone = arg; break;
 	case 'k': d->packages = arg; break;
 	case 's': d->services = arg; break;
-	case 'v': d->verbose = TRUE; break;
 	default: g_free(arg); return ARGP_ERR_UNKNOWN;
 	}
 	return 0;
@@ -226,11 +234,15 @@ static gint run(Data *d, GSubprocess **process, GInputStream **stdout, const gch
 	if(!g_subprocess_wait(proc, d->cancellable, &error) || error)
 	{
 		if(error)
-			EXIT(d, 1, g_error_free(error), "%s", error->message)
+			EXIT(d, 1, g_object_unref(proc);g_error_free(error), "%s", error->message)
 		EXIT(d, 1, , "Process cancelled")
 	}
 	
-	int exit = g_subprocess_get_exit_status(proc);
+	int exit = 1;
+	if(g_subprocess_get_if_exited(proc))
+		exit = g_subprocess_get_exit_status(proc);
+	else
+		println("Process aborted (signal: %i)", g_subprocess_get_if_signaled(proc) ? g_subprocess_get_term_sig(proc) : 0);
 	
 	if(stdout)
 		*stdout = g_subprocess_get_stdout_pipe(proc);
@@ -382,6 +394,7 @@ static gint mount_volume(Data *d)
 static gint run_pacstrap(Data *d)
 {
 	ensure_argument(d, &d->packages);
+	//goto skip;
 	gchar ** split = g_strsplit(d->packages, " ", -1);
 	guint numPackages = 0;
 	for(guint i=0;split[i]!=NULL;++i)
@@ -393,8 +406,14 @@ static gint run_pacstrap(Data *d)
 	args[1] = d->mountPath;
 	args[2] = "base";
 	for(guint i=0,j=3;split[i]!=NULL;++i)
+	{
 		if(split[i][0] != '\0')
+		{
+			if(g_strcmp0(split[i], "sudo") == 0)
+				d->enableSudoWheel = TRUE;
 			args[j++] = split[i];
+		}
+	}
 	args[numPackages+3] = '\0';
 		
 	gint status = run(d, NULL, NULL, (const gchar * const *)args);
@@ -404,8 +423,9 @@ static gint run_pacstrap(Data *d)
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, status, , "Pacstrap failed with code %i.", -status)
+		EXIT(d, -status, , "pacstrap failed with code %i.", -status)
 	
+skip:
 	step(d);
 	return run_genfstab(d);
 }
@@ -418,11 +438,11 @@ static gint run_genfstab(Data *d)
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, status, g_object_unref(proc), "Genfstab failed with code %i.", -status)
+		EXIT(d, -status, g_object_unref(proc), "Genfstab failed with code %i.", -status)
 	
-	gchar *path = g_build_path("/", d->mountPath, "etc/fstab");
+	gchar *path = g_build_path("/", d->mountPath, "etc/fstab", NULL);
 	println("Writing generated fstab to %s", path);
-	gint fstab = open(path, O_WRONLY);
+	gint fstab = open(path, O_WRONLY|O_CREAT);
 	if(fstab < 0)
 		EXIT(d, 1, g_free(path);g_object_unref(proc), "Failed to open fstab for writing")
 	g_free(path);
@@ -445,5 +465,279 @@ static gint run_chroot(Data *d)
 	println("Changing root to %s", d->mountPath);
 	if(!exitable_chroot(d->mountPath))
 		return 1;
+	
+	// A number of processes use devfs (such as piping to/from
+	// /dev/null, and hwclock which uses /dev/rtc)
+	if(mount("udev", "/dev", "devtmpfs", MS_NOSUID, "mode=0755"))
+	{
+		// Don't error if it's already mounted
+		if(errno != EBUSY)
+			EXIT(d, errno, , "Failed to mount /dev devtmps with error %i.", errno)
+	}
+	
 	step(d);
+	gint r = set_passwd(d);
+	umount("/dev");
+	return r;
+}
+
+static gint chpasswd(Data *d, const gchar *user, const gchar *password)
+{
+	println("Running chpasswd on %s", user);
+	GError *error = NULL;
+	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE, &error, "chpasswd", NULL);
+	if(error)
+		EXIT(d, 1, g_error_free(error), "%s", error->message)
+	
+	GOutputStream *stdin = g_subprocess_get_stdin_pipe(proc);
+
+	int userlen = strlen(user);
+	int pwdlen = strlen(password);
+	
+	if(g_output_stream_write(stdin, user, userlen, d->cancellable, &error) != userlen 
+	|| g_output_stream_write(stdin, ":", 1, d->cancellable, &error) != 1
+	|| g_output_stream_write(stdin, password, pwdlen, d->cancellable, &error) != pwdlen
+	|| !g_output_stream_close(stdin, d->cancellable, &error))
+	{
+		EXIT(d, 1, g_object_unref(proc);g_clear_error(&error), "%s", (error ? error->message : "Failed to write to chpasswd"))
+	}
+	
+	if(!g_subprocess_wait(proc, d->cancellable, &error) || error)
+	{
+		if(error)
+			EXIT(d, 1, g_object_unref(proc);g_error_free(error), "%s", error->message)
+		EXIT(d, 1, , "Process cancelled")
+	}
+	
+	int exit = g_subprocess_get_exit_status(proc);
+	g_object_unref(proc);
+	if(exit != 0)
+		EXIT(d, exit, , "chpasswd failed with code %i.", exit)
+	return 0;
+}
+
+static gint set_passwd(Data *d)
+{
+	ensure_argument(d, &d->password);
+	if(d->password[0] == '\0')
+	{
+		printf("Skipping set password\n");
+		step(d);
+		return set_locale(d);
+	}
+	
+	gint status = 0;
+	if((status = chpasswd(d, "root", d->password)))
+		return status;
+	
+	step(d);
+	return set_locale(d);
+}
+
+static gint set_locale(Data *d)
+{
+	ensure_argument(d, &d->locale);
+	
+	const gchar *locale = d->locale;
+	if(locale[0] == '\0')
+		locale = "en_US.UTF-8";
+	gchar *localeesc = g_regex_escape_string(locale, -1);
+	
+	// Remove comments from any lines matching the given locale prefix
+	gchar *pattern = g_strdup_printf("s/^#(%s.*$)/\\1/", localeesc);
+	gint status = RUN(d, NULL, NULL, "sed", "-i", "-E", pattern, "/etc/locale.gen");
+	g_free(pattern);
+	if(status > 0)
+	{
+		g_free(localeesc);
+		return status;
+	}
+	else if(status < 0)
+		EXIT(d, -status, g_free(localeesc), "Edit of /etc/locale.gen failed with code %i.", -status)
+	
+	// Write first locale match to /etc/locale.conf (for the LANG variable)
+	
+	GInputStream *stdout = NULL;
+	GSubprocess *proc = NULL;
+	pattern = g_strdup_printf("^%s", localeesc);
+	g_free(localeesc);
+	status = RUN(d, &proc, &stdout, "grep", "-m1", "-e", pattern, "/etc/locale.gen");
+	g_free(pattern);
+	if(status > 0)
+		return status;
+	else if(status < -1) // exit code of 1 means no lines found, not error
+		EXIT(d, -status, g_object_unref(proc), "grep failed with code %i.", -status)
+	
+	gint lconff = open("/etc/locale.conf", O_WRONLY|O_CREAT);
+	if(lconff < 0)
+		EXIT(d, errno, g_object_unref(proc), "Failed to open locale.conf for writing")
+	
+	write(lconff, "LANG=", 5);
+	
+	char buf[1024];
+	gsize num = 0;
+	while((num = g_input_stream_read(stdout, buf, 1024, NULL, NULL)) > 0)
+	{
+		// Only write until the first space
+		const gchar *space = strchr(buf, ' ');
+		if(space != NULL)
+			num = (space - buf);
+
+		if(write(lconff, buf, num) != num)
+			EXIT(d, 1, close(lconff);g_object_unref(proc), "Failed to write %i bytes to locale.conf", num)
+		
+		if(space != NULL)
+			break;
+	}	
+	write(lconff, "\n", 1);
+	close(lconff);
+	
+	step(d);
+	return set_zone(d);
+}
+
+static gint set_zone(Data *d)
+{
+	ensure_argument(d, &d->zone);
+	const gchar *zone = "UTC";
+	if(d->zone[0] != '\0')
+		zone = d->zone;
+	
+	gchar *path = g_build_path("/", "/usr/share/zoneinfo/", zone, NULL);
+	println("Symlinking %s to /etc/localtime", path);
+
+	errno = 0;
+	if(symlink(path, "/etc/localtime"))
+	{
+		// Try to symlink first before deleting the file
+		// If unlink first, then symlink, and symlink fails, then the
+		// install is left with no /etc/locatime at all. Checking that the
+		// symlink error is EEXIST, and not some other filesystem
+		// error, means it will probably succeed after calling unlink.
+		if(errno == EEXIST)
+		{
+			errno = 0;
+			printf("/etc/localtime already exists, replacing\n");
+			if(!unlink("/etc/localtime"))
+				symlink(path, "/etc/localtime");
+		}
+	}
+	
+	if(errno)
+		EXIT(d, errno, g_free(path), "Error symlinking: %i", errno);
+	
+	step(d);
+	g_free(path);
+	
+	// Set /etc/adjtime
+	gint status = RUN(d, NULL, NULL, "hwclock", "--systohc");
+	if(status > 0)
+		return status;
+	else if(status < 0)
+		EXIT(d, -status, , "Failed to set system clock with error %i.", -status)
+	
+	step(d);
+	return set_hostname(d);
+}
+
+static gint set_hostname(Data *d)
+{
+	ensure_argument(d, &d->hostname);
+	if(d->hostname[0] == '\0')
+	{
+		printf("Skipping setting hostname");
+		step(d);
+		return create_user(d);
+	}
+	
+	println("Writing %s to hostname", d->hostname);
+	gint hostf = open("/etc/hostname", O_WRONLY|O_CREAT);
+	if(hostf < 0)
+		EXIT(d, errno, , "Failed to open /etc/hostname for writing")
+	int len = strlen(d->hostname);
+	write(hostf, d->hostname, len);
+	write(hostf, "\n", 1);
+	close(hostf);
+	
+	step(d);
+	return create_user(d);
+}
+
+static gint create_user(Data *d)
+{
+	ensure_argument(d, &d->username);
+	if(d->username[0] == '\0')
+	{
+		printf("Skipping create user\n");
+		d->steps++; // create_user has two steps
+		step(d);
+		return enable_services(d);
+	}
+	
+	ensure_argument(d, &d->password);
+	
+	gint status = RUN(d, NULL, NULL, "useradd", "-m", "-G", "wheel", d->username);
+	
+	if(status > 0)
+		return status;
+	// error code 9 is user already existed. As this installer should be
+	// repeatable (in order to easily fix problems and retry), ignore this error.
+	else if(status != -9 && status < 0)
+		EXIT(d, -status, , "Failed to create user, error code %i.", -status)
+	
+	status = 0;
+	if((status = chpasswd(d, d->username, d->password)))
+		return status;
+	step(d);
+	
+	// Enable sudo for user
+	if(d->enableSudoWheel)
+	{
+		println("Enabling sudo for user %s", d->username);
+		gint status = RUN(d, NULL, NULL, "sed", "-i", "-E", "s/#\\s?(%wheel ALL=\\(ALL\\) ALL)/\\1/", "/etc/sudoers");
+		if(status > 0)
+			return status;
+		else if(status < 0)
+			EXIT(d, -status, , "Edit of /etc/sudoers failed with code %i.", -status)
+	}
+	
+	step(d);
+	return enable_services(d);
+}
+
+static gint enable_services(Data *d)
+{
+	ensure_argument(d, &d->services);
+	if(d->services[0] == '\0')
+	{
+		printf("No services to enable\n");
+		step(d);
+		return 0;
+	}
+	
+	gchar ** split = g_strsplit(d->services, " ", -1);
+	guint numServices = 0;
+	for(guint i=0;split[i]!=NULL;++i)
+		if(split[i][0] != '\0') // two spaces between services create empty splits
+			numServices++;
+	
+	gchar **args = g_new(gchar *, numServices + 3);
+	args[0] = "systemctl";
+	args[1] = "enable";
+	for(guint i=0,j=2;split[i]!=NULL;++i)
+		if(split[i][0] != '\0')
+			args[j++] = split[i];
+	args[numServices+2] = '\0';
+		
+	gint status = run(d, NULL, NULL, (const gchar * const *)args);
+	g_free(args);
+	g_strfreev(split);
+	
+	if(status > 0)
+		return status;
+	else if(status < 0)
+		EXIT(d, -status, , "systemctl enable failed with code %i.", -status)
+	
+	step(d);
+	return 0;
 }
