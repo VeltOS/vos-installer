@@ -36,6 +36,13 @@
  * -s  --services  A list of systemd services to enable in the installed
  *                   arch, separated by spaces. Or NONE/blank STDIN for no
  *                   extra services.
+ *     --skippacstrap  Skips the package installation.
+ *     --ext4      If present, runs mkfs.ext4 on the destination volume
+ *                   before installing. This will erase all contents on
+ *                   the volume. Without this, this installer can be used
+ *                   to upgrade or fix an existing arch installation.
+ *                   Without this argument, the installation will fail
+ *                   if the volume is not a Linux-capable filesystem.
  *
  * All arguments an be passed over STDIN in the
  * form ^<argname>=<value>$ where ^ means start of line and $ means
@@ -90,6 +97,7 @@ static struct argp_option options[] =
 	{"zone",      'z', "file",      0, "Timezone file (relative to /usr/share/zoneinfo/)"},
 	{"packages",  'k', "packages",  0, "List of extra packages separated by spaces"},
 	{"services",  's', "services",  0, "List of systemd services to enable"},
+	{"ext4",      998, 0,           0, "Erases the destination volume and writes a new ext4 filesystem"},
 	{"skippacstrap", 999, 0,        0, "Skips pacstrap, to avoid reinstalling all packages if they're already installed"},
 	{0}
 };
@@ -98,7 +106,7 @@ const char *argp_program_version = "vos-install-cli 0.1";
 const char *argp_program_bug_address = "Aidan Shafran <zelbrium@gmail.com>";
 static char argp_program_doc[] = "An installer for VeltOS (Arch Linux). See top of main.c for detailed instructions on how to use the installer. The program author is not responsible for any damages, including but not limited to exploded computer, caused by this program. Use as root and with caution.";
 
-const guint kMaxSteps = 12;
+const guint kMaxSteps = 13;
 
 typedef struct
 {
@@ -112,6 +120,7 @@ typedef struct
 	gchar *packages;
 	gchar *services;
 	gboolean skipPacstrap;
+	gboolean writeExt4;
 	
 	// Running data
 	GCancellable *cancellable;
@@ -122,6 +131,8 @@ typedef struct
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state);
 static void progress(Data *d);
+static gint start(Data *d);
+static gint run_ext4(Data *d);
 static gint mount_volume(Data *d);
 static gint run_pacstrap(Data *d);
 static gint run_genfstab(Data *d);
@@ -152,7 +163,7 @@ int main(int argc, char **argv)
 	REPL_NONE(d->services);
 	#undef REPL_NONE
 	
-	gint code = mount_volume(d);
+	gint code = start(d);
 	
 	g_free(d->dest);
 	g_free(d->hostname);
@@ -182,6 +193,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'z': d->zone = arg; break;
 	case 'k': d->packages = arg; break;
 	case 's': d->services = arg; break;
+	case 998: d->writeExt4 = TRUE; break;
 	case 999: d->skipPacstrap = TRUE; break;
 	default: g_free(arg); return ARGP_ERR_UNKNOWN;
 	}
@@ -344,6 +356,36 @@ static gboolean exitable_chroot(const gchar *path)
 	return TRUE;
 }
 
+static gint start(Data *d)
+{
+	return run_ext4(d);
+}
+
+static gint run_ext4(Data *d)
+{
+	if(!d->writeExt4)
+	{
+		step(d);
+		return mount_volume(d);
+	}
+	
+	ensure_argument(d, &d->dest, "destination");
+	
+	gint status = RUN(d, NULL, NULL, "udisksctl", "unmount", "-b", d->dest);
+	if(status > 0)
+		return status;
+	else if(status < 0)
+		EXIT(d, -status, , "Unmount failed with code %i.", -status)
+	
+	status = RUN(d, NULL, NULL, "mkfs.ext4", d->dest);
+	if(status > 0)
+		return status;
+	else if(status < 0)
+		EXIT(d, -status, , "mkfs.ext4 failed with code %i.", -status)
+	
+	step(d);
+	return mount_volume(d);
+}
 
 static gint mount_volume(Data *d)
 {
