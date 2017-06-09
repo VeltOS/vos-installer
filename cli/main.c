@@ -435,7 +435,10 @@ static gint mount_volume(Data *d)
 	
 	println("Mounted at %s", d->mountPath);
 	step(d);
-	return run_pacstrap(d);
+	gint r = run_pacstrap(d);
+	printf("Unmounting volume\n");
+	status = RUN(d, NULL, NULL, "udisksctl", "unmount", "-b", d->dest);
+	return r;
 }
 
 static gint run_pacstrap(Data *d)
@@ -528,7 +531,9 @@ static gint run_chroot(Data *d)
 	
 	step(d);
 	gint r = set_passwd(d);
+	printf("Leaving chroot\n");
 	umount("/dev");
+	exitable_chroot(NULL);
 	return r;
 }
 
