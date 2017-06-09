@@ -90,6 +90,7 @@ static struct argp_option options[] =
 	{"zone",      'z', "file",      0, "Timezone file (relative to /usr/share/zoneinfo/)"},
 	{"packages",  'k', "packages",  0, "List of extra packages separated by spaces"},
 	{"services",  's', "services",  0, "List of systemd services to enable"},
+	{"skippacstrap", 999, 0,        0, "Skips pacstrap, to avoid reinstalling all packages if they're already installed"},
 	{0}
 };
 
@@ -110,6 +111,7 @@ typedef struct
 	gchar *zone;
 	gchar *packages;
 	gchar *services;
+	gboolean skipPacstrap;
 	
 	// Running data
 	GCancellable *cancellable;
@@ -180,6 +182,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'z': d->zone = arg; break;
 	case 'k': d->packages = arg; break;
 	case 's': d->services = arg; break;
+	case 999: d->skipPacstrap = TRUE; break;
 	default: g_free(arg); return ARGP_ERR_UNKNOWN;
 	}
 	return 0;
@@ -255,8 +258,10 @@ static gint run(Data *d, GSubprocess **process, GInputStream **stdout, const gch
 
 // Checks if the arg is available (non-NULL)
 // If it isn't, reads and parses STDIN until it is non-NULL
-static void ensure_argument(Data *d, gchar **arg)
+static void ensure_argument(Data *d, gchar **arg, const gchar *argname)
 {
+	if(*arg == NULL)
+		println("WAITING %s", argname);
 	GIOChannel *ch = NULL; 
 	while(*arg == NULL)
 	{
@@ -342,7 +347,7 @@ static gboolean exitable_chroot(const gchar *path)
 
 static gint mount_volume(Data *d)
 {
-	ensure_argument(d, &d->dest);
+	ensure_argument(d, &d->dest, "destination");
 	
 	// Let udisks do the mounting, since it mounts the drive in a
 	// unique spot, unlike simply mounting at /mnt.
@@ -393,8 +398,13 @@ static gint mount_volume(Data *d)
 
 static gint run_pacstrap(Data *d)
 {
-	ensure_argument(d, &d->packages);
-	//goto skip;
+	if(d->skipPacstrap)
+	{
+		step(d);
+		return run_genfstab(d);
+	}
+		
+	ensure_argument(d, &d->packages, "packages");
 	gchar ** split = g_strsplit(d->packages, " ", -1);
 	guint numPackages = 0;
 	for(guint i=0;split[i]!=NULL;++i)
@@ -425,7 +435,6 @@ static gint run_pacstrap(Data *d)
 	else if(status < 0)
 		EXIT(d, -status, , "pacstrap failed with code %i.", -status)
 	
-skip:
 	step(d);
 	return run_genfstab(d);
 }
@@ -518,7 +527,7 @@ static gint chpasswd(Data *d, const gchar *user, const gchar *password)
 
 static gint set_passwd(Data *d)
 {
-	ensure_argument(d, &d->password);
+	ensure_argument(d, &d->password, "password");
 	if(d->password[0] == '\0')
 	{
 		printf("Skipping set password\n");
@@ -536,7 +545,7 @@ static gint set_passwd(Data *d)
 
 static gint set_locale(Data *d)
 {
-	ensure_argument(d, &d->locale);
+	ensure_argument(d, &d->locale, "locale");
 	
 	const gchar *locale = d->locale;
 	if(locale[0] == '\0')
@@ -598,7 +607,7 @@ static gint set_locale(Data *d)
 
 static gint set_zone(Data *d)
 {
-	ensure_argument(d, &d->zone);
+	ensure_argument(d, &d->zone, "zone");
 	const gchar *zone = "UTC";
 	if(d->zone[0] != '\0')
 		zone = d->zone;
@@ -642,7 +651,7 @@ static gint set_zone(Data *d)
 
 static gint set_hostname(Data *d)
 {
-	ensure_argument(d, &d->hostname);
+	ensure_argument(d, &d->hostname, "hostname");
 	if(d->hostname[0] == '\0')
 	{
 		printf("Skipping setting hostname");
@@ -665,7 +674,7 @@ static gint set_hostname(Data *d)
 
 static gint create_user(Data *d)
 {
-	ensure_argument(d, &d->username);
+	ensure_argument(d, &d->username, "username");
 	if(d->username[0] == '\0')
 	{
 		printf("Skipping create user\n");
@@ -674,7 +683,7 @@ static gint create_user(Data *d)
 		return enable_services(d);
 	}
 	
-	ensure_argument(d, &d->password);
+	ensure_argument(d, &d->password, "password");
 	
 	gint status = RUN(d, NULL, NULL, "useradd", "-m", "-G", "wheel", d->username);
 	
@@ -685,9 +694,17 @@ static gint create_user(Data *d)
 	else if(status != -9 && status < 0)
 		EXIT(d, -status, , "Failed to create user, error code %i.", -status)
 	
-	status = 0;
-	if((status = chpasswd(d, d->username, d->password)))
-		return status;
+	if(d->password[0] == '\0')
+	{
+		printf("Skipping set password on user\n");
+	}
+	else
+	{
+		status = 0;
+		if((status = chpasswd(d, d->username, d->password)))
+			return status;
+	}
+	
 	step(d);
 	
 	// Enable sudo for user
@@ -707,7 +724,7 @@ static gint create_user(Data *d)
 
 static gint enable_services(Data *d)
 {
-	ensure_argument(d, &d->services);
+	ensure_argument(d, &d->services, "services");
 	if(d->services[0] == '\0')
 	{
 		printf("No services to enable\n");
