@@ -40,8 +40,6 @@ static void page_drive_select_class_init(PageDriveSelectClass *class)
 
 static void page_drive_select_init(PageDriveSelect *self)
 {
-	cmk_focus_on_mapped(CLUTTER_ACTOR(self));
-	
 	self->driveListBox = cmk_scroll_box_new(CLUTTER_SCROLL_HORIZONTALLY);
 	ClutterBoxLayout *listLayout = CLUTTER_BOX_LAYOUT(clutter_box_layout_new());
 	clutter_box_layout_set_orientation(listLayout, CLUTTER_ORIENTATION_HORIZONTAL); 
@@ -50,7 +48,7 @@ static void page_drive_select_init(PageDriveSelect *self)
 	clutter_actor_set_layout_manager(CLUTTER_ACTOR(self->driveListBox), CLUTTER_LAYOUT_MANAGER(listLayout));
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->driveListBox));
 
-	self->helpLabel = cmk_label_new_full("Please select a drive to install VeltOS on. All contents of the selected drive will be erased!", 1, TRUE);
+	self->helpLabel = cmk_label_new_full("Please select a drive to install VeltOS on. All contents of the selected drive will be erased!", TRUE);
 	cmk_label_set_line_alignment(self->helpLabel, PANGO_ALIGN_CENTER);
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->helpLabel));
 	
@@ -59,12 +57,11 @@ static void page_drive_select_init(PageDriveSelect *self)
 		(StorageDeviceRemovedCb)on_drive_removed,
 		self);
 	
-	CmkLabel *l = cmk_label_new_with_text("Use Selected Drive");
-
-	self->nextButton = cmk_button_new_full(NULL, CMK_BUTTON_TYPE_BEVELED);
-	cmk_button_set_content(self->nextButton, CMK_WIDGET(l));
-	cmk_widget_set_background_color_name(CMK_WIDGET(self->nextButton), "accent");
+	self->nextButton = cmk_button_new_with_text("Use Selected Drive", CMK_BUTTON_TYPE_RAISED);
+	cmk_widget_set_disabled(CMK_WIDGET(self->nextButton), TRUE);
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->nextButton));
+	//g_signal_connect(self->nextButton, "activate", G_CALLBACK(on_next_select), self);
+	g_signal_connect_swapped(self->nextButton, "activate", G_CALLBACK(cmk_widget_replace), self);
 }
 
 static void on_dispose(GObject *self_)
@@ -80,7 +77,7 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 
 	gfloat width = clutter_actor_box_get_width(box);
 	gfloat height = clutter_actor_box_get_height(box);
-	gfloat pad = cmk_widget_style_get_padding(CMK_WIDGET(self))*3;
+	gfloat pad = CMK_DP(self_, 30);
 
 	gfloat minW, minH, natW, natH;
 	clutter_actor_get_preferred_size(CLUTTER_ACTOR(self->nextButton), &minW, &minH, &natW, &natH);
@@ -114,9 +111,20 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 static void on_drive_select(CmkButton *driveButton, PageDriveSelect *self)
 {
 	if(self->selectedDriveButton)
+	{
+		//clutter_actor_save_easing_state(CLUTTER_ACTOR(self->selectedDriveButton));
+		//clutter_actor_set_easing_duration(CLUTTER_ACTOR(self->selectedDriveButton), 1000);
+		//cmk_widget_set_background_color(CMK_WIDGET(self->selectedDriveButton), "hover");
+		//clutter_actor_restore_easing_state(CLUTTER_ACTOR(self->selectedDriveButton));
 		cmk_button_set_selected(self->selectedDriveButton, FALSE);
+	}
 	self->selectedDriveButton = driveButton;
 	cmk_button_set_selected(driveButton, TRUE);
+	//clutter_actor_save_easing_state(CLUTTER_ACTOR(driveButton));
+	//clutter_actor_set_easing_duration(CLUTTER_ACTOR(driveButton), 5000);
+	//cmk_widget_set_background_color(CMK_WIDGET(driveButton), "accent");
+	//clutter_actor_restore_easing_state(CLUTTER_ACTOR(driveButton));
+	cmk_widget_set_disabled(CMK_WIDGET(self->nextButton), FALSE);
 }
 
 static gboolean add_drive(StorageDevice *device)
@@ -138,9 +146,9 @@ static gboolean add_drive(StorageDevice *device)
 	
 	const char *iconName = device->removable ? "drive-removable-media" : "drive-harddisk";
 
-	CmkButton *button = cmk_button_new();
+	CmkButton *button = cmk_button_new(CMK_BUTTON_TYPE_FLAT);
 	clutter_actor_set_name(CLUTTER_ACTOR(button), device->node);
-	cmk_button_set_type(button, CMK_BUTTON_TYPE_BEVELED); 
+	cmk_button_set_type(button, CMK_BUTTON_TYPE_FLAT); 
 	
 	CmkWidget *box = cmk_widget_new();
 	ClutterBoxLayout *list = CLUTTER_BOX_LAYOUT(clutter_box_layout_new());

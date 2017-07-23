@@ -10,6 +10,7 @@ add_executable(vos-install-gui
 	main.c
 	page-00-home.c
 	page-01-drive-select.c
+	page-02-profile.c
 	sd-utils.c
 )
 
@@ -19,14 +20,17 @@ pkg_check_modules(CMK REQUIRED libcmk>=0.1.0)
 
 target_include_directories(vos-install-gui PRIVATE
 	${CMK_INCLUDE_DIRS}
+	#/home/aidan/projects/cmk/src
 	${LIBUDEV_INCLUDE_DIRS}
 )
 target_link_libraries(vos-install-gui
+	SegFault
 	${CMK_LIBRARIES}
+	#/home/aidan/projects/cmk/build/libcmk.so
 	${LIBUDEV_LIBRARIES}
 	m
 )
 
-add_subdirectory(/home/aidan/projects/cmk /home/aidan/projects/cmk/build)
+#add_subdirectory(/home/aidan/projects/cmk /home/aidan/projects/cmk/build)
 add_subdirectory(cli)
-add_dependencies(vos-install-gui vos-install-cli cmk)
+#add_dependencies(vos-install-gui vos-install-cli cmk)

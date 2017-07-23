@@ -31,18 +31,18 @@ static void page_home_class_init(PageHomeClass *class)
 static void page_home_init(PageHome *self)
 {
 	self->logo = cmk_icon_new_full("velt", "Velt", 256, FALSE);
+	clutter_actor_set_opacity(CLUTTER_ACTOR(self->logo), 180);
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->logo));
 
-	self->nextButton = cmk_button_new_full("Begin Installation", CMK_BUTTON_TYPE_BEVELED);
+	self->nextButton = cmk_button_new_with_text("Begin Installation", CMK_BUTTON_TYPE_RAISED);
 	// main.c ignores the replacement argument, so just replace with button
 	g_signal_connect_swapped(self->nextButton, "activate", G_CALLBACK(cmk_widget_replace), self);
-	cmk_widget_set_background_color_name(CMK_WIDGET(self->nextButton), "accent");
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->nextButton));
 }
 
 static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, ClutterAllocationFlags flags)
 {
-	PageHome *self = PAGE_HOME(self);
+	PageHome *self = PAGE_HOME(self_);
 
 	gfloat width = clutter_actor_box_get_width(box);
 	gfloat height = clutter_actor_box_get_height(box);
