@@ -11,7 +11,7 @@
 static const CmkNamedColor GrapheneColors[] = {
 	{"background", {84,  110, 122, 255}},
 	{"foreground", {255, 255, 255, 204}},
-	{"primary",    {208, 39,  39,  180}}, // vosred, #D02727
+	{"primary",    {171, 59,  63,  255}}, // vosred, normally #D02727, but shaded to background to #ab3b3f
 	{"hover",      {255, 255, 255, 40}},
 	{"selected",   {255, 255, 255, 50}},
 	{"error",      {120, 0,   0,   220}},

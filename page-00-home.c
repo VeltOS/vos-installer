@@ -5,7 +5,6 @@
  */
 
 #include "pages.h"
-#include <libcmk/cmk.h>
 
 struct _PageHome
 {

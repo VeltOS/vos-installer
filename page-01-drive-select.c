@@ -6,7 +6,6 @@
 
 #include "pages.h"
 #include "sd-utils.h"
-#include <libcmk/cmk.h>
 #include <string.h>
 
 struct _PageDriveSelect
