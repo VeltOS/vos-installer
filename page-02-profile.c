@@ -5,6 +5,7 @@
  */
 
 #include "pages.h"
+#include "sd-utils.h"
 #include <string.h>
 
 struct _PageProfile
@@ -82,7 +83,7 @@ static void page_profile_init(PageProfile *self)
 	clutter_actor_set_x_align(CLUTTER_ACTOR(z), CLUTTER_ACTOR_ALIGN_FILL);
 	cmk_widget_set_margin(CMK_WIDGET(z), 30, 15, 0, 0);
 	clutter_actor_add_child(CLUTTER_ACTOR(left), CLUTTER_ACTOR(z));
-	g_signal_connect_swapped(z, "activate", G_CALLBACK(validate_input), self);
+	g_signal_connect_swapped(z, "changed", G_CALLBACK(validate_input), self);
 	self->hostname = z;
 
 	// TODO: Select location
@@ -95,7 +96,7 @@ static void page_profile_init(PageProfile *self)
 	clutter_actor_set_x_expand(CLUTTER_ACTOR(z), TRUE);
 	cmk_widget_set_margin(CMK_WIDGET(z), 15, 30, 0, 0);
 	clutter_actor_add_child(CLUTTER_ACTOR(right), CLUTTER_ACTOR(z));
-	g_signal_connect_swapped(z, "activate", G_CALLBACK(validate_input), self);
+	g_signal_connect_swapped(z, "changed", G_CALLBACK(validate_input), self);
 	self->username = z;
 	
 	z = cmk_textfield_new("Password", "For both the default user and root accounts");
@@ -103,7 +104,7 @@ static void page_profile_init(PageProfile *self)
 	cmk_widget_set_margin(CMK_WIDGET(z), 15, 30, 0, 0);
 	clutter_actor_set_x_expand(CLUTTER_ACTOR(z), TRUE);
 	clutter_actor_add_child(CLUTTER_ACTOR(right), CLUTTER_ACTOR(z));
-	g_signal_connect_swapped(z, "activate", G_CALLBACK(validate_input), self);
+	g_signal_connect_swapped(z, "changed", G_CALLBACK(validate_input), self);
 	self->password = z;
 	
 	z = cmk_textfield_new("Confirm Password", NULL);
@@ -111,7 +112,7 @@ static void page_profile_init(PageProfile *self)
 	cmk_widget_set_margin(CMK_WIDGET(z), 15, 30, 0, 0);
 	clutter_actor_set_x_expand(CLUTTER_ACTOR(z), TRUE);
 	clutter_actor_add_child(CLUTTER_ACTOR(right), CLUTTER_ACTOR(z));
-	g_signal_connect_swapped(z, "activate", G_CALLBACK(validate_input), self);
+	g_signal_connect_swapped(z, "changed", G_CALLBACK(validate_input), self);
 	self->passwordValidate = z;
 
 	// Make the tab order flow from left to right instead of top to bottom
@@ -178,10 +179,38 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 	clutter_actor_allocate(CLUTTER_ACTOR(self->backButton), &backButton, flags);
 }
 
+extern StorageDevice *gSelectedDevice;
+extern void spawn_installer_process(const gchar *drive, const gchar *name, const gchar *username, const gchar *hostname, const gchar *password);
+
+static void on_confirm_dialog_select(PageProfile *self, const gchar *selection)
+{
+	// This is a potentially data-destroying choice, so be super careful
+	// that the user has selected the option and that nothing has changed
+	// while the dialog is open.
+	gchar *b = g_strdup_printf("Install to %s", gSelectedDevice->node);
+	if(strlen(b) == strlen(selection) && g_strcmp0(selection, b) == 0)
+	{
+		cmk_widget_replace(CMK_WIDGET(self), NULL);
+		spawn_installer_process(gSelectedDevice->node,
+			cmk_textfield_get_text(self->name),
+			cmk_textfield_get_text(self->username),
+			cmk_textfield_get_text(self->hostname),
+			cmk_textfield_get_text(self->password));
+	}
+}
+
 static void on_next_button_activate(PageProfile *self)
 {
 	if(validate_input(self, NULL))
-		cmk_widget_replace(CMK_WIDGET(self), NULL);
+	{
+		gchar *l = g_strdup_printf("You are about to install VeltOS to\n\n  \"%s\" (%s)\n\nThis will PERMANENTLY DESTROY ALL DATA on the drive. Are you sure you want to continue?\n", gSelectedDevice->name, gSelectedDevice->node);
+		gchar *b = g_strdup_printf("Install to %s", gSelectedDevice->node);
+		CmkDialog *d = cmk_dialog_new_simple(l, NULL, "STOP!", b, NULL);
+		g_signal_connect_swapped(d, "select", G_CALLBACK(on_confirm_dialog_select), self);
+		g_free(b);
+		g_free(l);
+		cmk_dialog_show(d, CMK_WIDGET(self));
+	}
 }
 
 static const gchar * validate_hostname(const gchar *hostname)

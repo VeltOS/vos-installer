@@ -24,7 +24,7 @@ static void next_page(ClutterActor *current)
 	ClutterActor *next = clutter_actor_get_next_sibling(current);
 	cmk_widget_fade_out(CMK_WIDGET(current), FALSE);
 	cmk_widget_fade_in(CMK_WIDGET(next));
-	cmk_focus_stack_pop(CMK_WIDGET(current));
+	cmk_focus_stack_pop();
 	cmk_focus_stack_push(CMK_WIDGET(next));
 }
 
@@ -33,7 +33,7 @@ static void prev_page(ClutterActor *current)
 	ClutterActor *prev = clutter_actor_get_previous_sibling(current);
 	cmk_widget_fade_out(CMK_WIDGET(current), FALSE);
 	cmk_widget_fade_in(CMK_WIDGET(prev));
-	cmk_focus_stack_pop(CMK_WIDGET(current));
+	cmk_focus_stack_pop();
 	cmk_focus_stack_push(CMK_WIDGET(prev));
 }
 
@@ -47,7 +47,7 @@ int main(int argc, char **argv)
 	cmk_icon_loader_load(l, cmk_icon_loader_lookup(l, "drive-harddisk", 256), 256, 2, TRUE);
 	
 	ClutterStage *stage;
-	CmkWidget *window = cmk_window_new("Velt Installer", 600, 450, &stage);
+	CmkWidget *window = cmk_window_new("Velt Installer", "velt", 600, 450, &stage);
 	clutter_stage_set_user_resizable(stage, FALSE);
 	cmk_widget_set_named_colors(window, GrapheneColors);
 	g_signal_connect(window, "destroy", G_CALLBACK(clutter_main_quit), NULL);
@@ -70,6 +70,11 @@ int main(int argc, char **argv)
 	cmk_widget_bind_fill(profile);
 	g_signal_connect(profile, "replace", G_CALLBACK(next_page), NULL);
 	g_signal_connect(profile, "back", G_CALLBACK(prev_page), NULL);
+	
+	CmkWidget *complete = page_complete_new();
+	clutter_actor_hide(CLUTTER_ACTOR(complete));
+	cmk_widget_add_child(window, complete);
+	cmk_widget_bind_fill(complete);
 	
 	cmk_main();
 	return 0;

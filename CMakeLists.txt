@@ -11,6 +11,7 @@ add_executable(vos-install-gui
 	page-00-home.c
 	page-01-drive-select.c
 	page-02-profile.c
+	page-03-complete.c
 	sd-utils.c
 )
 

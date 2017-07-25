@@ -24,6 +24,8 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 static void on_drive_added(StorageDevice *device, PageDriveSelect *self);
 static void on_drive_removed(StorageDevice *device, PageDriveSelect *self);
 
+StorageDevice *gSelectedDevice;
+
 G_DEFINE_TYPE(PageDriveSelect, page_drive_select, CMK_TYPE_WIDGET);
 
 CmkWidget * page_drive_select_new(void)
@@ -124,6 +126,14 @@ static void on_drive_select(CmkButton *driveButton, PageDriveSelect *self)
 	//cmk_widget_set_background_color(CMK_WIDGET(driveButton), "accent");
 	//clutter_actor_restore_easing_state(CLUTTER_ACTOR(driveButton));
 	cmk_widget_set_disabled(CMK_WIDGET(self->nextButton), FALSE);
+
+	if(gSelectedDevice)
+	{
+		free_storage_device(gSelectedDevice);
+		gSelectedDevice = NULL;
+	}
+
+	gSelectedDevice = copy_storage_device(g_object_get_data(G_OBJECT(driveButton), "device"));
 }
 
 static gboolean add_drive(StorageDevice *device)
@@ -146,6 +156,7 @@ static gboolean add_drive(StorageDevice *device)
 	const char *iconName = device->removable ? "drive-removable-media" : "drive-harddisk";
 
 	CmkButton *button = cmk_button_new(CMK_BUTTON_TYPE_FLAT);
+	g_object_set_data_full(G_OBJECT(button), "device", device, (GDestroyNotify)free_storage_device);
 	clutter_actor_set_name(CLUTTER_ACTOR(button), device->node);
 	cmk_button_set_type(button, CMK_BUTTON_TYPE_FLAT); 
 	
@@ -166,7 +177,6 @@ static gboolean add_drive(StorageDevice *device)
 	cmk_button_set_content(button, box);
 	g_signal_connect(button, "activate", G_CALLBACK(on_drive_select), self);
 	clutter_actor_add_child(CLUTTER_ACTOR(self->driveListBox), CLUTTER_ACTOR(button));
-	free_storage_device(device);
 	return G_SOURCE_REMOVE;
 }
 

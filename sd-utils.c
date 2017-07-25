@@ -134,6 +134,7 @@ static void check_drive_device_action(MonitorThreadData *monitor, GArray *drives
 
 static void free_storage_device_contents(StorageDevice *device)
 {
+	g_return_if_fail(device);
 	g_free(device->node);
 	g_free(device->name);
 	g_free(device->fs);
@@ -204,6 +205,8 @@ void free_storage_device(StorageDevice *device)
 
 StorageDevice * copy_storage_device(const StorageDevice *device)
 {
+	if(!device)
+		return NULL;
 	StorageDevice *copy = g_new0(StorageDevice, 1);
 	copy->node = g_strdup(device->node);
 	copy->name = g_strdup(device->name);
