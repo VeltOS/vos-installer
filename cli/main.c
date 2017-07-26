@@ -147,6 +147,9 @@ static gint enable_services(Data *d);
 
 int main(int argc, char **argv)
 {
+	// Don't buffer stdout, seems to mess with GSubprocess/GInputStream
+	setbuf(stdout, NULL);
+
 	Data *d = g_new0(Data, 1);
 	static struct argp argp = {options, parse_arg, NULL, argp_program_doc};
 	error_t error;
@@ -204,7 +207,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 
 static inline void progress(Data *d)
 {
-	println("Progress: %f", (gfloat)(d)->steps / kMaxSteps);
+	println("PROGRESS %f", (gfloat)(d)->steps / kMaxSteps);
 }
 
 static inline void step(Data *d)
@@ -222,26 +225,26 @@ static inline void step(Data *d)
 }
 
 // Use like: gint status = RUN(..)
-#define RUN(d, process, stdout, args...) 0; { \
+#define RUN(d, process, sout, args...) 0; { \
 	gchar *argv [] = {args, NULL}; \
-	status = run(d, process, stdout, (const gchar * const *)argv); \
+	status = run(d, process, sout, (const gchar * const *)argv); \
 }
 
 // Returns the process's exit code as a negative, to distinugish a child
 // process error (possibly not fatal) from a GSubprocess error (fatal).
 // If stdout is non-NULL, then process must also be non-NULL, and the caller
 // must call g_object_unref on process after using the stdout stream.
-static gint run(Data *d, GSubprocess **process, GInputStream **stdout, const gchar * const *args)
+static gint run(Data *d, GSubprocess **process, GInputStream **sout, const gchar * const *args)
 {
 	if(process) *process = NULL;
-	if(stdout) *stdout = NULL;
+	if(sout) *sout = NULL;
 	
 	gchar *cmd = g_strjoinv(" ", (gchar **)args);
 	println("Running: %s", cmd);
 	g_free(cmd);
 	
 	GError *error = NULL;
-	GSubprocess *proc = g_subprocess_newv(args, stdout ? (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE) : G_SUBPROCESS_FLAGS_NONE, &error);
+	GSubprocess *proc = g_subprocess_newv(args, sout ? (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE) : G_SUBPROCESS_FLAGS_NONE, &error);
 	
 	if(error)
 		EXIT(d, 1, g_error_free(error), "%s", error->message)
@@ -259,8 +262,8 @@ static gint run(Data *d, GSubprocess **process, GInputStream **stdout, const gch
 	else
 		println("Process aborted (signal: %i)", g_subprocess_get_if_signaled(proc) ? g_subprocess_get_term_sig(proc) : 0);
 	
-	if(stdout)
-		*stdout = g_subprocess_get_stdout_pipe(proc);
+	if(sout)
+		*sout = g_subprocess_get_stdout_pipe(proc);
 	if(process)
 		*process = proc;
 	else
@@ -279,6 +282,11 @@ static void ensure_argument(Data *d, gchar **arg, const gchar *argname)
 	{
 		gchar *line = NULL;
 		gsize len = 0;
+		//char *line = NULL;
+		//size_t size;
+		//if(getline(&line, &size, stdin) == -1)
+		//	exit(1);
+		//g_message("got line");
 		if(!ch) ch = g_io_channel_unix_new(STDIN_FILENO);
 		if(g_io_channel_read_line(ch, &line, &len, NULL, NULL) != G_IO_STATUS_NORMAL)
 			exit(1);
@@ -369,13 +377,14 @@ static gint run_ext4(Data *d)
 		return mount_volume(d);
 	}
 	
-	ensure_argument(d, &d->dest, "destination");
+	ensure_argument(d, &d->dest, "dest");
 	
 	gint status = RUN(d, NULL, NULL, "udisksctl", "unmount", "-b", d->dest);
-	if(status > 0)
-		return status;
-	else if(status < 0)
-		EXIT(d, -status, , "Unmount failed with code %i.", -status)
+	// Don't worry if this fails, since it might not have been mounted at all
+	//if(status > 0)
+	//	return status;
+	//else if(status < 0)
+	//	EXIT(d, -status, , "Unmount failed with code %i.", -status)
 	
 	status = RUN(d, NULL, NULL, "mkfs.ext4", d->dest);
 	if(status > 0)
@@ -389,20 +398,20 @@ static gint run_ext4(Data *d)
 
 static gint mount_volume(Data *d)
 {
-	ensure_argument(d, &d->dest, "destination");
+	ensure_argument(d, &d->dest, "dest");
 	
 	// Let udisks do the mounting, since it mounts the drive in a
 	// unique spot, unlike simply mounting at /mnt.
 	// Could do this with udisks dbus API but lazy.
 	
-	GInputStream *stdout = NULL;
+	GInputStream *sout = NULL;
 	GSubprocess *proc = NULL;
-	gint status = RUN(d, &proc, &stdout, "udisksctl", "mount", "-b", d->dest);
+	gint status = RUN(d, &proc, &sout, "udisksctl", "mount", "-b", d->dest);
 	if(status > 0)
 		return status;
 	status = -status;
 	gchar buf[1024];
-	gsize num = g_input_stream_read(stdout, buf, 1024, NULL, NULL);
+	gsize num = g_input_stream_read(sout, buf, 1024, NULL, NULL);
 	g_object_unref(proc);
 	
 	if(status == 0)
@@ -486,9 +495,9 @@ static gint run_pacstrap(Data *d)
 
 static gint run_genfstab(Data *d)
 {
-	GInputStream *stdout = NULL;
+	GInputStream *sout = NULL;
 	GSubprocess *proc = NULL;
-	gint status = RUN(d, &proc, &stdout, "genfstab", d->mountPath);
+	gint status = RUN(d, &proc, &sout, "genfstab", d->mountPath);
 	if(status > 0)
 		return status;
 	else if(status < 0)
@@ -503,7 +512,7 @@ static gint run_genfstab(Data *d)
 	
 	char buf[1024];
 	gsize num = 0;
-	while((num = g_input_stream_read(stdout, buf, 1024, NULL, NULL)) > 0)
+	while((num = g_input_stream_read(sout, buf, 1024, NULL, NULL)) > 0)
 	{
 		if(write(fstab, buf, num) != num)
 			EXIT(d, 1, close(fstab);g_object_unref(proc), "Failed to write %i bytes to fstab", num)
@@ -613,11 +622,11 @@ static gint set_locale(Data *d)
 	
 	// Write first locale match to /etc/locale.conf (for the LANG variable)
 	
-	GInputStream *stdout = NULL;
+	GInputStream *sout = NULL;
 	GSubprocess *proc = NULL;
 	pattern = g_strdup_printf("^%s", localeesc);
 	g_free(localeesc);
-	status = RUN(d, &proc, &stdout, "grep", "-m1", "-e", pattern, "/etc/locale.gen");
+	status = RUN(d, &proc, &sout, "grep", "-m1", "-e", pattern, "/etc/locale.gen");
 	g_free(pattern);
 	if(status > 0)
 		return status;
@@ -632,7 +641,7 @@ static gint set_locale(Data *d)
 	
 	char buf[1024];
 	gsize num = 0;
-	while((num = g_input_stream_read(stdout, buf, 1024, NULL, NULL)) > 0)
+	while((num = g_input_stream_read(sout, buf, 1024, NULL, NULL)) > 0)
 	{
 		// Only write until the first space
 		const gchar *space = strchr(buf, ' ');
