@@ -45,9 +45,9 @@ static void add_drive_device(MonitorThreadData *monitor, GArray *drives, struct 
 	if(devType == NULL || strncmp(devType, "partition", 9) != 0)
 		return;
 	
-	const gchar *name = udev_device_get_property_value(dev, "PARTNAME");
+	const gchar *name = udev_device_get_property_value(dev, "ID_FS_LABEL");
 	if(!name)
-		name = g_strdup(udev_device_get_property_value(dev, "ID_FS_LABEL"));
+		name = udev_device_get_property_value(dev, "PARTNAME");
 	if(!name)
 		return;
 	

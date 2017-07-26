@@ -171,8 +171,8 @@ static gboolean add_drive(StorageDevice *device)
 	CmkLabel *label = cmk_label_new_with_text(device->name);
 	clutter_actor_add_child(CLUTTER_ACTOR(box), CLUTTER_ACTOR(label));
 	
-	CmkLabel *fs = cmk_label_new_with_text(device->fs);
-	clutter_actor_add_child(CLUTTER_ACTOR(box), CLUTTER_ACTOR(fs));
+	CmkLabel *node = cmk_label_new_with_text(device->node);
+	clutter_actor_add_child(CLUTTER_ACTOR(box), CLUTTER_ACTOR(node));
 		
 	cmk_button_set_content(button, box);
 	g_signal_connect(button, "activate", G_CALLBACK(on_drive_select), self);
