@@ -596,7 +596,7 @@ static gint run_genfstab(Data *d)
 {
 	GInputStream *sout = NULL;
 	GSubprocess *proc = NULL;
-	gint status = RUN(d, &proc, &sout, "genfstab", d->mountPath);
+	gint status = RUN(d, &proc, &sout, "genfstab", "-U", d->mountPath);
 	if(status > 0)
 		return status;
 	else if(status < 0)
