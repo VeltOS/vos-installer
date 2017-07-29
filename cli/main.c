@@ -43,6 +43,8 @@
  *                   to upgrade or fix an existing arch installation.
  *                   Without this argument, the installation will fail
  *                   if the volume is not a Linux-capable filesystem.
+ *     --kill      Specify the path to a fifo. If any data is written
+ *                   to this fifo, the installer will immediately abort.
  *
  * All arguments an be passed over STDIN in the
  * form ^<argname>=<value>$ where ^ means start of line and $ means
@@ -86,6 +88,9 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 static struct argp_option options[] =
 {
@@ -99,6 +104,7 @@ static struct argp_option options[] =
 	{"services",  's', "services",  0, "List of systemd services to enable"},
 	{"ext4",      998, 0,           0, "Erases the destination volume and writes a new ext4 filesystem"},
 	{"skippacstrap", 999, 0,        0, "Skips pacstrap, to avoid reinstalling all packages if they're already installed"},
+	{"kill",  997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately."},
 	{0}
 };
 
@@ -127,6 +133,7 @@ typedef struct
 	guint steps;
 	gchar *mountPath;
 	gboolean enableSudoWheel;
+	char *killfifo;
 } Data;
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state);
@@ -144,17 +151,105 @@ static gint set_hostname(Data *d);
 static gint create_user(Data *d);
 static gint enable_services(Data *d);
 
+static int pgid = 0;
+static gboolean killing = FALSE;
+
+
+// Can be called from different threads. I don't think race conditions
+// are a problem here (between checking 'killing' and setting it to TRUE)
+// since pgid is set at program start, and it's just killing everything
+// everything anyway.
+static void stopinstall(void)
+{
+	if(killing)
+		return;
+	
+	// Make sure no new processes start
+	killing = TRUE;
+	// rejoin parent's process group, so that 'kill' below doesn't kill us
+	setpgid(0, getpgid(getppid()));
+	// stop all descendants (or those with same pgid)
+	kill(-pgid, SIGINT);
+	// Wait 1 second; if the process did get killed, the program
+	// should exit before this finishes
+	sleep(1);
+	// try again
+	kill(-pgid, SIGKILL);
+}
+
+// Thread
+// Wait for data to be sent to the killfifo
+static void * killfifo_watch(void *path)
+{
+	int fifo = open((const char *)path, O_RDONLY);
+	char x[2];
+	x[0] = '\0';
+	x[1] = '\0';
+	read(fifo, &x, 1);
+	stopinstall();
+	return NULL;
+}
+
+// Thread
+// Constantly make sure the parent doesn't change (will
+// happen if the original parent dies). If it does, abort.
+static void * parent_watch(void *data)
+{
+	int ppid = getppid();
+	do
+	{
+		sleep(1);
+	} while(getppid() == ppid);
+	printf("\nParent changed, stopping install\n\n");
+	stopinstall();
+}
+
+static void sigterm_handler(int signum)
+{
+	printf("\nReceived %i, stopping install\n\n", signum);
+	static gboolean called = FALSE;
+	if(called)
+		exit(1);
+	else
+	{
+		stopinstall();
+		called = TRUE;
+	}
+}
+
 
 int main(int argc, char **argv)
 {
 	// Don't buffer stdout, seems to mess with GSubprocess/GInputStream
 	setbuf(stdout, NULL);
 
+	// New process group, for killfifo
+	setpgid(0, 0);
+	pgid = getpgid(0);
+
+	// Watch for int/term/hup
+	signal(SIGHUP, sigterm_handler);
+	signal(SIGINT, sigterm_handler);
+	signal(SIGTERM, sigterm_handler);
+	// TODO: Use sigaction, since apparently signal() has
+	// undefined behavior when multiple threads are involved.
+	//struct sigaction act;
+	//act.sa_sigaction = sigio;
+	//sigemptyset(&act.sa_mask);
+	//act.sa_flags = SA_SIGINFO;
+	//sigaction(SIGIO, &act, NULL);
+
 	Data *d = g_new0(Data, 1);
 	static struct argp argp = {options, parse_arg, NULL, argp_program_doc};
 	error_t error;
 	if((error = argp_parse(&argp, argc, argv, 0, 0, d)))
 		return error;
+	
+	pthread_t p, p2;
+	
+	if(d->killfifo)
+		pthread_create(&p, NULL, killfifo_watch, d->killfifo);
+	pthread_create(&p2, NULL, parent_watch, NULL);
 
 	#define REPL_NONE(val) if(g_strcmp0(val, "NONE") == 0) { g_free(val); val = g_strdup(""); }
 	REPL_NONE(d->hostname);
@@ -196,6 +291,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'z': d->zone = arg; break;
 	case 'k': d->packages = arg; break;
 	case 's': d->services = arg; break;
+	case 997: d->killfifo = arg; break;
 	case 998: d->writeExt4 = TRUE; break;
 	case 999: d->skipPacstrap = TRUE; break;
 	default: g_free(arg); return ARGP_ERR_UNKNOWN;
@@ -236,6 +332,9 @@ static inline void step(Data *d)
 // must call g_object_unref on process after using the stdout stream.
 static gint run(Data *d, GSubprocess **process, GInputStream **sout, const gchar * const *args)
 {
+	if(killing)
+		return 1;
+	
 	if(process) *process = NULL;
 	if(sout) *sout = NULL;
 	
