@@ -29,7 +29,7 @@ static void page_home_class_init(PageHomeClass *class)
 
 static void page_home_init(PageHome *self)
 {
-	self->logo = cmk_icon_new_full("velt", "Velt", 256, FALSE);
+	self->logo = cmk_icon_new_full("velt", "hicolor", 256, FALSE);
 	clutter_actor_set_opacity(CLUTTER_ACTOR(self->logo), 180);
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->logo));
 
