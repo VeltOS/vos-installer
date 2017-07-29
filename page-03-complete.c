@@ -7,6 +7,8 @@
 #include "pages.h"
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 struct _PageComplete
 {
@@ -16,6 +18,9 @@ struct _PageComplete
 	CmkLabel *termText;
 	CmkButton *nextButton;
 };
+
+static PageComplete *pageComplete = NULL;
+static GSubprocess *gInstallerProc = NULL;
 
 static void on_dispose(GObject *self_);
 static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, ClutterAllocationFlags flags);
@@ -33,10 +38,6 @@ static void page_complete_class_init(PageCompleteClass *class)
 	//G_OBJECT_CLASS(class)->dispose = on_dispose;
 	CLUTTER_ACTOR_CLASS(class)->allocate = on_allocate;
 }
-
-static PageComplete *pageComplete;
-
-void spawn_installer_process(const gchar *drive, const gchar *name, const gchar *username, const gchar *hostname, const gchar *password);
 
 static void page_complete_init(PageComplete *self)
 {
@@ -59,13 +60,16 @@ static void page_complete_init(PageComplete *self)
 	self->nextButton = cmk_button_new_with_text("Abort Install", CMK_BUTTON_TYPE_RAISED);
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->nextButton));
 	g_signal_connect_swapped(self->nextButton, "activate", G_CALLBACK(on_next_button_activate), self);
-	//spawn_installer_process("", "", "", "", "");
 }
 
 static void write_line(const gchar *line)
 {
 	g_return_if_fail(PAGE_IS_COMPLETE(pageComplete));
 	const gchar *text = cmk_label_get_text(pageComplete->termText);
+	guint len = strlen(text);
+	// Seems to be a bug with too many chars on screen?
+	if(len > 10000)
+		text = text + len - 10000; // last 10000 chars
 	gchar *new = g_strconcat(text, line, "\n", NULL);
 	cmk_label_set_text(pageComplete->termText, new);
 	g_free(new);
@@ -97,12 +101,12 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 	{
 		const gchar *waiting = line + 8;
 		const gchar *write = "";
-		g_message("Waiting on '%s'", waiting);
 		
 		if(g_str_has_prefix(waiting, "dest"))
-			write = "/dev/a17f1"; // TODO: Temporary hardcode to my flash drive //g_object_get_data(G_OBJECT(stream), "destination");
+			write = g_object_get_data(G_OBJECT(stream), "destination");
 		else if(g_str_has_prefix(waiting, "packages"))
-			write = ""; // TODO
+			write = "chromium dconf-editor eog gedit gnome-terminal gnome-calculator graphene-desktop lightdm lightdm-gtk-greeter networkmanager noto-fonts paper-gtk-theme-git paper-icon-theme-git veltos-config xorg yaourt"; // TODO: Removed some of the packages because i don't need them for testing
+			//write = "cheese chromium dconf-editor eog gedit gnome-terminal gnome-calculator graphene-desktop libreoffice lightdm lightdm-gtk-greeter networkmanager noto-fonts paper-gtk-theme-git paper-icon-theme-git rhythmbox totem veltos-config xorg yaourt";
 		else if(g_str_has_prefix(waiting, "password"))
 			write = g_object_get_data(G_OBJECT(stream), "password");
 		else if(g_str_has_prefix(waiting, "locale"))
@@ -114,7 +118,7 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 		else if(g_str_has_prefix(waiting, "username"))
 			write = g_object_get_data(G_OBJECT(stream), "username");
 		else if(g_str_has_prefix(waiting, "services"))
-			write = ""; // TODO
+			write = "lightdm NetworkManager";
 		
 		GOutputStream *sin = g_subprocess_get_stdin_pipe(proc);
 		GError *error = NULL;
@@ -125,7 +129,6 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 			g_message("Error writing to installer: %s", error ? error->message : "No error");
 		}
 		g_output_stream_flush(sin, NULL, NULL);
-		g_message("written %s (%i)", write, bw);
 	}
 	else if(g_str_has_prefix(line, "PROGRESS "))
 	{
@@ -145,13 +148,18 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 		G_PRIORITY_DEFAULT,
 		NULL,
 		(GAsyncReadyCallback)on_read_line_async,
-		NULL);
+		proc);
 }
+
+//static const gchar * generate_
 
 static void on_proc_complete(GSubprocess *proc, GAsyncResult *res, gpointer x)
 {
 	gboolean s = g_subprocess_wait_finish(proc, res, NULL);
+	gInstallerProc = NULL;
 
+	unlink("/tmp/vos-installer-killfifo");
+	cmk_button_set_text(pageComplete->nextButton, "Close");
 	gboolean exited = g_subprocess_get_if_exited(proc);
 	if(!exited)
 	{
@@ -163,7 +171,7 @@ static void on_proc_complete(GSubprocess *proc, GAsyncResult *res, gpointer x)
 	{
 		gint status = g_subprocess_get_exit_status(proc);
 		if(status == 0)
-			write_line("Installation complete!");
+			write_line("\n\nInstallation complete!\n\n");
 		else
 			write_line("An error occurred during installation.");
 		g_message("Process done: wait_finish: %i, exited: %i, exit_status: %i", s, exited, status);
@@ -172,11 +180,16 @@ static void on_proc_complete(GSubprocess *proc, GAsyncResult *res, gpointer x)
 
 void spawn_installer_process(const gchar *drive, const gchar *name, const gchar *username, const gchar *hostname, const gchar *password)
 {
-	g_message("spawn %s, %s, %s, %s, %s", drive, name, username, hostname, password);
+	//g_message("spawn %s, %s, %s, %s, %s", drive, name, username, hostname, password);
+
+	// TODO: Maybe randomly generate a name, so that multiple installers
+	// can run simulataneously without their aborts stopping both?
+	mkfifo("/tmp/vos-installer-killfifo", 600);
 
 	GError *error = NULL;
-	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error, "pkexec", "/home/aidan/projects/vos-installer/build/cli/vos-install-cli", "--ext4", NULL);
+	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error, "pkexec", "/home/aidan/projects/vos-installer/build/cli/vos-install-cli", "--ext4", "--kill", "/tmp/vos-installer-killfifo", NULL);
 
+	gInstallerProc = proc;
 	g_message("proc: %p %p %s", proc, error, error ? error->message : "");
 
 	g_subprocess_wait_async(proc, NULL, (GAsyncReadyCallback)on_proc_complete, NULL);
@@ -235,5 +248,13 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 
 static void on_next_button_activate(PageComplete *self)
 {
-	clutter_main_quit();
+	if(!gInstallerProc)
+	{
+		clutter_main_quit();
+		return;
+	}
+	int fifo = open("/tmp/vos-installer-killfifo", O_WRONLY);
+	char x = 'k';
+	write(fifo, &x, 1);
+	close(fifo);
 }

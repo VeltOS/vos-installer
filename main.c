@@ -7,6 +7,7 @@
 #include <libcmk/cmk.h>
 #include <libcmk/cmk-icon-loader.h>
 #include "pages.h"
+#include <fcntl.h>
 
 static const CmkNamedColor GrapheneColors[] = {
 	{"background", {84,  110, 122, 255}},
@@ -18,7 +19,8 @@ static const CmkNamedColor GrapheneColors[] = {
 	NULL
 };
 
-CmkWidget *window;
+static CmkWidget *window;
+
 static void next_page(ClutterActor *current)
 {
 	ClutterActor *next = clutter_actor_get_next_sibling(current);
@@ -77,5 +79,11 @@ int main(int argc, char **argv)
 	cmk_widget_bind_fill(complete);
 	
 	cmk_main();
+	
+	int fifo = open("/tmp/vos-installer-killfifo", O_WRONLY);
+	char x = 'k';
+	write(fifo, &x, 1);
+	close(fifo);
+	unlink("/tmp/vos-installer-killfifo");
 	return 0;
 }
