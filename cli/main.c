@@ -755,6 +755,13 @@ static gint set_locale(Data *d)
 	}	
 	write(lconff, "\n", 1);
 	close(lconff);
+
+	// Run locale-gen
+	status = RUN(d, NULL, NULL, "locale-gen");
+	if(status > 0)
+		return status;
+	else if(status < 0)
+		EXIT(d, -status, , "locale-gen failed with code %i.", -status)
 	
 	step(d);
 	return set_zone(d);
