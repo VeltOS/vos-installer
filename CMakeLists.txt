@@ -15,23 +15,28 @@ add_executable(vos-install-gui
 	sd-utils.c
 )
 
+#add_custom_target(build_cmk
+#	WORKING_DIRECTORY /home/aidan/projects/cmk/build
+#	COMMAND make
+#	COMMAND sudo make install > /dev/null
+#)
+#
+#add_dependencies(vos-install-gui build_cmk)
+
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUDEV REQUIRED libudev)
-pkg_check_modules(CMK REQUIRED libcmk>=0.1.0)
+pkg_check_modules(CMK REQUIRED libcmk>=0.4)
 
 target_include_directories(vos-install-gui PRIVATE
 	${CMK_INCLUDE_DIRS}
-	#/home/aidan/projects/cmk/src
 	${LIBUDEV_INCLUDE_DIRS}
 )
 target_link_libraries(vos-install-gui
 	SegFault
-	${CMK_LIBRARIES}
-	#/home/aidan/projects/cmk/build/libcmk.so
-	${LIBUDEV_LIBRARIES}
 	m
+	${CMK_LIBRARIES}
+	${LIBUDEV_LIBRARIES}
 )
 
-#add_subdirectory(/home/aidan/projects/cmk /home/aidan/projects/cmk/build)
 add_subdirectory(cli)
-#add_dependencies(vos-install-gui vos-install-cli cmk)

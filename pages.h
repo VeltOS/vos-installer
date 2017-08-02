@@ -7,7 +7,7 @@
 #ifndef __PAGES_H__
 #define __PAGES_H__
 
-#include <libcmk/cmk.h>
+#include <cmk/cmk.h>
 
 G_BEGIN_DECLS
 

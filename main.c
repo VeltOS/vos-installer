@@ -4,8 +4,8 @@
  * Licensed under the Apache License 2 <www.apache.org/licenses/LICENSE-2.0>.
  */
 
-#include <libcmk/cmk.h>
-#include <libcmk/cmk-icon-loader.h>
+#include <cmk/cmk.h>
+#include <cmk/cmk-icon-loader.h>
 #include "pages.h"
 #include <fcntl.h>
 
