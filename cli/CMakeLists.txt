@@ -9,14 +9,17 @@ add_executable(vos-install-cli
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
 pkg_check_modules(GIO REQUIRED gio-2.0)
+pkg_check_modules(LIBUDEV REQUIRED libudev)
 
 target_include_directories(vos-install-cli PRIVATE
 	${GLIB_INCLUDE_DIRS}
 	${GIO_INCLUDE_DIRS}
+	${LIBUDEV_INCLUDE_DIRS}
 )
 target_link_libraries(vos-install-cli
 	SegFault
 	pthread
 	${GLIB_LIBRARIES}
 	${GIO_LIBRARIES}
+	${LIBUDEV_LIBRARIES}
 )

@@ -91,6 +91,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <libudev.h>
 
 static struct argp_option options[] =
 {
@@ -134,6 +135,8 @@ typedef struct
 	gchar *mountPath;
 	gboolean enableSudoWheel;
 	char *killfifo;
+	char *partuuid;
+	char *ofstype; // original fs type before running mkfs.ext4, or NULL if none
 } Data;
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state);
@@ -469,6 +472,44 @@ static gboolean exitable_chroot(const gchar *path)
 
 static gint start(Data *d)
 {
+	// Get the PARTUUID of the destination drive before
+	// anything else. If anything it helps validate that
+	// it's a real drive. Also I'd rather the install fail
+	// right at the beginning than after pacstrap if
+	// something's wrong with udev.
+	ensure_argument(d, &d->dest, "dest");
+	
+	struct udev *udev = udev_new();
+	if(!udev)
+		EXIT(d, 1, , "udev unavailable", 1)
+	
+	// Apparently no way to get a udev_device by its devnode
+	struct udev_enumerate *enumerate = udev_enumerate_new(udev);
+	udev_enumerate_add_match_subsystem(enumerate, "block");
+	udev_enumerate_scan_devices(enumerate);
+
+	struct udev_device *dev = NULL;
+	struct udev_list_entry *devListEntry;
+	struct udev_list_entry *devices = udev_enumerate_get_list_entry(enumerate);
+	udev_list_entry_foreach(devListEntry, devices)
+	{
+		const char *path = udev_list_entry_get_name(devListEntry);
+		dev = udev_device_new_from_syspath(udev, path);
+		if(g_strcmp0(udev_device_get_devnode(dev), d->dest) == 0)
+			break;
+		udev_device_unref(dev);
+		dev = NULL;
+	}
+	
+	if(!dev)
+		EXIT(d, 1, udev_unref(udev), "Destination device not found.", 1)
+	
+	d->partuuid = g_strdup(udev_device_get_property_value(dev, "ID_PART_ENTRY_UUID"));
+	if(!d->partuuid)
+		EXIT(d, 1, udev_unref(udev), "PARTUUID not found.", 1)
+	d->ofstype = g_strdup(udev_device_get_property_value(dev, "ID_FS_TYPE"));
+	udev_unref(udev);
+	
 	return run_ext4(d);
 }
 
@@ -603,29 +644,36 @@ static gint run_pacstrap(Data *d)
 
 static gint run_genfstab(Data *d)
 {
-	GInputStream *sout = NULL;
-	GSubprocess *proc = NULL;
-	gint status = RUN(d, &proc, &sout, "genfstab", "-U", d->mountPath);
-	if(status > 0)
-		return status;
-	else if(status < 0)
-		EXIT(d, -status, g_object_unref(proc), "Genfstab failed with code %i.", -status)
+	gchar *etcpath = g_build_path("/", d->mountPath, "etc", NULL);
+	errno = 0;
+	if(mkdir(etcpath, 0755))
+		if(errno != EEXIST)
+			EXIT(d, errno, g_free(etcpath), "Failed to create /etc");
 	
-	gchar *path = g_build_path("/", d->mountPath, "etc/fstab", NULL);
-	println("Writing generated fstab to %s", path);
-	gint fstab = open(path, O_WRONLY|O_CREAT);
-	if(fstab < 0)
-		EXIT(d, 1, g_free(path);g_object_unref(proc), "Failed to open fstab for writing")
-	g_free(path);
+	gchar *fstabpath = g_strconcat(etcpath, "/fstab", NULL);
+	g_free(etcpath);
 	
-	char buf[1024];
-	gsize num = 0;
-	while((num = g_input_stream_read(sout, buf, 1024, NULL, NULL)) > 0)
-	{
-		if(write(fstab, buf, num) != num)
-			EXIT(d, 1, close(fstab);g_object_unref(proc), "Failed to write %i bytes to fstab", num)
-	}	
-	close(fstab);
+	println("Writing generated fstab to %s", fstabpath);
+	FILE *fstab = fopen(fstabpath, "w");
+	g_free(fstabpath);
+	
+	if(!fstab)
+		EXIT(d, 1, , "Failed to open fstab for writing")
+
+	// Genfstab doesn't always write what we want (for example,
+	// writing nosuid under options when installing to a flash drive)
+	// so write it outselves.
+
+	const gchar *fstype = d->writeExt4 ? "ext4" : d->ofstype;
+	if(!fstype) // Should never happen, since the drive has already been mounted
+		EXIT(d, 1, fclose(fstab), "Unknown filesystem type")
+
+	fprintf(fstab, "# <file system>\t<mount point>\t<fs type>\t<options>\t<dump>\t<pass>\n\n");
+	fprintf(fstab, "PARTUUID=%s\t/\t%s\trw,relatime,data=ordered\t0\t1\n",
+		d->partuuid,
+		fstype);
+	
+	fclose(fstab);
 	
 	step(d);
 	return run_chroot(d);
