@@ -159,7 +159,7 @@ static gboolean killing = FALSE;
 // are a problem here (between checking 'killing' and setting it to TRUE)
 // since pgid is set at program start, and it's just killing everything
 // everything anyway.
-static void stopinstall(void)
+static void stopinstall(gboolean wait)
 {
 	if(killing)
 		return;
@@ -170,11 +170,14 @@ static void stopinstall(void)
 	setpgid(0, getpgid(getppid()));
 	// stop all descendants (or those with same pgid)
 	kill(-pgid, SIGINT);
-	// Wait 1 second; if the process did get killed, the program
-	// should exit before this finishes
-	sleep(1);
-	// try again
-	kill(-pgid, SIGKILL);
+	if(wait)
+	{
+		// Wait 1 second; if the process did get killed, the program
+		// should exit before this finishes
+		sleep(1);
+		// try again
+		kill(-pgid, SIGKILL);
+	}
 }
 
 // Thread
@@ -186,7 +189,7 @@ static void * killfifo_watch(void *path)
 	x[0] = '\0';
 	x[1] = '\0';
 	read(fifo, &x, 1);
-	stopinstall();
+	stopinstall(TRUE);
 	return NULL;
 }
 
@@ -201,18 +204,19 @@ static void * parent_watch(void *data)
 		sleep(1);
 	} while(getppid() == ppid);
 	printf("\nParent changed, stopping install\n\n");
-	stopinstall();
+	stopinstall(TRUE);
 }
 
 static void sigterm_handler(int signum)
 {
-	printf("\nReceived %i, stopping install\n\n", signum);
+	//printf("\nReceived %i, stopping install\n\n", signum);
 	static gboolean called = FALSE;
 	if(called)
 		exit(1);
 	else
 	{
-		stopinstall();
+		// Don't wait; a user who presses ctrl+c will see a delay
+		stopinstall(FALSE);
 		called = TRUE;
 	}
 }
