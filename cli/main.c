@@ -397,7 +397,7 @@ static void ensure_argument(Data *d, gchar **arg, const gchar *argname)
 			continue;
 		
 		// +2 because g_io_channel_read_line includes the \n at the end
-		#define TRY(x, n) if(len >= ((n)+2) && !d->x && strncmp(line, #x "=", (n)+1) == 0) { d->x = g_strndup(line+((n)+1), len-((n)+2)); }
+		#define TRY(x, n) if(len >= ((n)+2) && !d->x && strncmp(line, #x "=", (n)+1) == 0) { d->x = g_strstrip(g_strndup(line+((n)+1), len-((n)+2))); }
 		TRY(password, 8)
 		else TRY(dest, 4)
 		else TRY(hostname, 8)
@@ -517,6 +517,7 @@ static gint mount_volume(Data *d)
 	gsize num = g_input_stream_read(sout, buf, 1024, NULL, NULL);
 	g_object_unref(proc);
 	
+	gboolean alreadyMounted = FALSE;
 	if(status == 0)
 	{
 		gchar *phrase = g_strdup_printf("Mounted %s at", d->dest);
@@ -543,13 +544,17 @@ static gint mount_volume(Data *d)
 			EXIT(d, status, , "Unexpected output: %.*s", num, buf);
 		d->mountPath = g_strndup(loc, (end-loc));
 		println("%s already mounted", d->dest);
+		alreadyMounted = TRUE;
 	}
 	
 	println("Mounted at %s", d->mountPath);
 	step(d);
 	gint r = run_pacstrap(d);
-	printf("Unmounting volume\n");
-	status = RUN(d, NULL, NULL, "udisksctl", "unmount", "-b", d->dest);
+	if(!alreadyMounted)
+	{
+		printf("Unmounting volume\n");
+		status = RUN(d, NULL, NULL, "udisksctl", "unmount", "-b", d->dest);
+	}
 	return r;
 }
 
@@ -630,7 +635,7 @@ static gint run_chroot(Data *d)
 {
 	println("Changing root to %s", d->mountPath);
 	if(!exitable_chroot(d->mountPath))
-		return 1;
+		EXIT(d, 1, , "Chroot failed (must run as root).", 1)
 	
 	// A number of processes use devfs (such as piping to/from
 	// /dev/null, and hwclock which uses /dev/rtc)
@@ -820,7 +825,7 @@ static gint set_hostname(Data *d)
 	ensure_argument(d, &d->hostname, "hostname");
 	if(d->hostname[0] == '\0')
 	{
-		printf("Skipping setting hostname");
+		printf("Skipping setting hostname\n");
 		step(d);
 		return create_user(d);
 	}
