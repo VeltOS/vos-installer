@@ -19,6 +19,8 @@
  *                   not set.
  * -u  --username  The username of the default user account, or
  *                   NONE/blank STDIN to not create a default user.
+ * -n  --name      The real name of the default user account, or
+ *                   NONe/blank STDIN to not set.
  * -p  --password  The password of the default user account, and
  *                   the password for the root account. Set NONE/blank STDIN
  *                   for automatic login.
@@ -102,6 +104,7 @@ static struct argp_option options[] =
 	{"dest",      'd', "block device", 0, "The volume to install Arch at"},
 	{"hostname",  'h', "name",      0, "Machine hostname"},
 	{"username",  'u', "name",      0, "Default account username"},
+	{"name",      'n', "name",      0, "Real name of default user"},
 	{"password",  'p', "password",  0, "Root/default account password"},
 	{"locale",    'l', "locale",    0, "Locale (locale.gen format)"},
 	{"zone",      'z', "file",      0, "Timezone file (relative to /usr/share/zoneinfo/)"},
@@ -126,6 +129,7 @@ typedef struct
 	gchar *dest;
 	gchar *hostname;
 	gchar *username;
+	gchar *name;
 	gchar *password;
 	gchar *locale;
 	gchar *zone;
@@ -269,6 +273,7 @@ int main(int argc, char **argv)
 	#define REPL_NONE(val) if(g_strcmp0(val, "NONE") == 0) { g_free(val); val = g_strdup(""); }
 	REPL_NONE(d->hostname);
 	REPL_NONE(d->username);
+	REPL_NONE(d->name);
 	REPL_NONE(d->password);
 	REPL_NONE(d->locale);
 	REPL_NONE(d->zone);
@@ -281,6 +286,7 @@ int main(int argc, char **argv)
 	g_free(d->dest);
 	g_free(d->hostname);
 	g_free(d->username);
+	g_free(d->name);
 	g_free(d->password);
 	g_free(d->locale);
 	g_free(d->zone);
@@ -302,6 +308,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'd': d->dest = arg; break;
 	case 'h': d->hostname = arg; break;
 	case 'u': d->username = arg; break;
+	case 'n': d->name = arg; break;
 	case 'p': d->password = arg; break;
 	case 'l': d->locale = arg; break;
 	case 'z': d->zone = arg; break;
@@ -415,6 +422,7 @@ static void ensure_argument(Data *d, gchar **arg, const gchar *argname)
 		else TRY(dest, 4)
 		else TRY(hostname, 8)
 		else TRY(username, 8)
+		else TRY(name, 4)
 		else TRY(locale, 6)
 		else TRY(zone, 4)
 		else TRY(packages, 8)
@@ -921,8 +929,6 @@ static gint create_user(Data *d)
 		return enable_services(d);
 	}
 	
-	ensure_argument(d, &d->password, "password");
-	
 	gint status = RUN(d, NULL, NULL, "useradd", "-m", "-G", "wheel", d->username);
 	
 	if(status > 0)
@@ -931,6 +937,8 @@ static gint create_user(Data *d)
 	// repeatable (in order to easily fix problems and retry), ignore this error.
 	else if(status != -9 && status < 0)
 		EXIT(d, -status, , "Failed to create user, error code %i.", -status)
+	
+	ensure_argument(d, &d->password, "password");
 	
 	if(d->password[0] == '\0')
 	{
@@ -941,6 +949,22 @@ static gint create_user(Data *d)
 		status = 0;
 		if((status = chpasswd(d, d->username, d->password)))
 			return status;
+	}
+
+	ensure_argument(d, &d->name, "name");
+
+	if(d->name[0] == '\0')
+	{
+		printf("Skipping set real name on user\n");
+	}
+	else
+	{
+		gint status = RUN(d, NULL, NULL, "chfn", "-f", d->name);
+		
+		if(status > 0)
+			return status;
+		else if(status < 0)
+			EXIT(d, -status, , "Failed to create user, error code %i.", -status)
 	}
 	
 	step(d);

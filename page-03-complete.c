@@ -117,6 +117,8 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 			write = g_object_get_data(G_OBJECT(stream), "hostname");
 		else if(g_str_has_prefix(waiting, "username"))
 			write = g_object_get_data(G_OBJECT(stream), "username");
+		else if(g_str_has_prefix(waiting, "name"))
+			write = g_object_get_data(G_OBJECT(stream), "name");
 		else if(g_str_has_prefix(waiting, "services"))
 			write = "lightdm NetworkManager";
 		
