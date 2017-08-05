@@ -187,7 +187,14 @@ void spawn_installer_process(const gchar *drive, const gchar *name, const gchar 
 	mkfifo("/tmp/vos-installer-killfifo", 600);
 
 	GError *error = NULL;
-	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error, "pkexec", "/home/aidan/projects/vos-installer/build/cli/vos-install-cli", "--ext4", "--kill", "/tmp/vos-installer-killfifo", NULL);
+	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error,
+		"pkexec",
+		"/home/aidan/projects/vos-installer/build/cli/vos-install-cli",
+		"--ext4=VeltOS",
+		"--kill=/tmp/vos-installer-killfifo",
+		"--postcmd",
+		"sed -i 's/^#background=.*$/background=\\/usr\\/share\\/veltos\\/wallpapers\\/default.png/; s/^#theme-name=.*$/theme-name=Paper/; s/^#icon-theme-name=.*$/icon-theme-name=Paper/; s/^#font-name=.*$/font-name=Noto Sans 11/; s/^#position=.*$/position=30%,center 50%,center/' /etc/lightdm/lightdm-gtk-greeter.conf",
+		NULL);
 
 	gInstallerProc = proc;
 	g_message("proc: %p %p %s", proc, error, error ? error->message : "");
