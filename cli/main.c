@@ -45,6 +45,10 @@
  *                   if the volume is not a Linux-capable filesystem.
  *     --kill      Specify the path to a fifo. If any data is written
  *                   to this fifo, the installer will immediately abort.
+ *     --postcmd   A shell command to run within the chroot of the new
+ *                   Arch install at the very end of the installation.
+ *                   This argument may be specified multiple times to
+ *                   run multiple scripts.
  *
  * All arguments an be passed over STDIN in the
  * form ^<argname>=<value>$ where ^ means start of line and $ means
@@ -103,9 +107,10 @@ static struct argp_option options[] =
 	{"zone",      'z', "file",      0, "Timezone file (relative to /usr/share/zoneinfo/)"},
 	{"packages",  'k', "packages",  0, "List of extra packages separated by spaces"},
 	{"services",  's', "services",  0, "List of systemd services to enable"},
-	{"ext4",      998, 0,           0, "Erases the destination volume and writes a new ext4 filesystem"},
+	{"ext4",      998, "new filesystem label",           OPTION_ARG_OPTIONAL, "Erases the destination volume and writes a new ext4 filesystem. Optionally specify a parameter which will become the new filesystem label."},
 	{"skippacstrap", 999, 0,        0, "Skips pacstrap, to avoid reinstalling all packages if they're already installed"},
 	{"kill",  997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately."},
+	{"postcmd", 996, "postcmd",     0, "Optionally specify a shell command to run after installation. This may be specified multiple times."},
 	{0}
 };
 
@@ -113,7 +118,7 @@ const char *argp_program_version = "vos-install-cli 0.1";
 const char *argp_program_bug_address = "Aidan Shafran <zelbrium@gmail.com>";
 static char argp_program_doc[] = "An installer for VeltOS (Arch Linux). See top of main.c for detailed instructions on how to use the installer. The program author is not responsible for any damages, including but not limited to exploded computer, caused by this program. Use as root and with caution.";
 
-const guint kMaxSteps = 13;
+const guint kMaxSteps = 14;
 
 typedef struct
 {
@@ -128,6 +133,8 @@ typedef struct
 	gchar *services;
 	gboolean skipPacstrap;
 	gboolean writeExt4;
+	gchar *newFSLabel; // Only if writeExt4
+	GList *postcmds;
 	
 	// Running data
 	GCancellable *cancellable;
@@ -153,6 +160,7 @@ static gint set_zone(Data *d);
 static gint set_hostname(Data *d);
 static gint create_user(Data *d);
 static gint enable_services(Data *d);
+static gint run_postcmd(Data *d);
 
 static int pgid = 0;
 static gboolean killing = FALSE;
@@ -280,6 +288,7 @@ int main(int argc, char **argv)
 	g_free(d->services);
 	g_clear_object(&d->cancellable);
 	g_free(d->mountPath);
+	g_list_free_full(d->postcmds, g_free);
 	g_free(d);
 	return code;
 }
@@ -298,8 +307,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'z': d->zone = arg; break;
 	case 'k': d->packages = arg; break;
 	case 's': d->services = arg; break;
+	case 996: d->postcmds = g_list_append(d->postcmds, arg); break;
 	case 997: d->killfifo = arg; break;
-	case 998: d->writeExt4 = TRUE; break;
+	case 998: d->writeExt4 = TRUE; d->newFSLabel = arg; break;
 	case 999: d->skipPacstrap = TRUE; break;
 	default: g_free(arg); return ARGP_ERR_UNKNOWN;
 	}
@@ -535,6 +545,15 @@ static gint run_ext4(Data *d)
 		return status;
 	else if(status < 0)
 		EXIT(d, -status, , "mkfs.ext4 failed with code %i.", -status)
+	
+	if(d->newFSLabel)
+	{
+		status = RUN(d, NULL, NULL, "e2label", d->dest, d->newFSLabel);
+		if(status > 0)
+			return status;
+		else if(status < 0)
+			EXIT(d, -status, , "e2label failed with code %i.", -status)
+	}
 	
 	step(d);
 	return mount_volume(d);
@@ -948,7 +967,7 @@ static gint enable_services(Data *d)
 	{
 		printf("No services to enable\n");
 		step(d);
-		return 0;
+		return run_postcmd(d);
 	}
 	
 	gchar ** split = g_strsplit(d->services, " ", -1);
@@ -973,6 +992,29 @@ static gint enable_services(Data *d)
 		return status;
 	else if(status < 0)
 		EXIT(d, -status, , "systemctl enable failed with code %i.", -status)
+	
+	step(d);
+	return run_postcmd(d);
+}
+
+static gint run_postcmd(Data *d)
+{
+	if(d->postcmds == NULL)
+	{
+		printf("No postcmds\n");
+		step(d);
+		return 0;
+	}
+	
+	for(GList *it=d->postcmds; it!=NULL; it=it->next)
+	{
+		gint status = RUN(d, NULL, NULL, "/bin/sh", "-c", it->data);
+		
+		if(status > 0)
+			return status;
+		else if(status < 0)
+			EXIT(d, -status, , "Postcmd '%s' failed with code %i.", it->data, -status)
+	}
 	
 	step(d);
 	return 0;
