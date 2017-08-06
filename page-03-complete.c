@@ -196,6 +196,8 @@ void spawn_installer_process(const gchar *drive, const gchar *name, const gchar 
 		"--kill=/tmp/vos-installer-killfifo",
 		"--postcmd",
 		"sed -i 's/^#background=.*$/background=\\/usr\\/share\\/veltos\\/wallpapers\\/default.png/; s/^#theme-name=.*$/theme-name=Paper/; s/^#icon-theme-name=.*$/icon-theme-name=Paper/; s/^#font-name=.*$/font-name=Noto Sans 11/; s/^#position=.*$/position=30%,center 50%,center/' /etc/lightdm/lightdm-gtk-greeter.conf",
+		"--repo",
+		"vosrepo,http://repo.velt.io/$arch,Required TrustAll,1BCE8B257234A9DA2A733339C876A8F2E3BB5484", // Aidan Shafran's signing key
 		NULL);
 
 	gInstallerProc = proc;

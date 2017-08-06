@@ -51,6 +51,13 @@
  *                   Arch install at the very end of the installation.
  *                   This argument may be specified multiple times to
  *                   run multiple scripts.
+ *     --repo     This installer generates a new /etc/pacman.conf on the
+ *                   target machine. This flag specifies a custom repo to
+ *                   add (before installing packages), in the format
+ *                   "Name,Server,SigLevel,keys...". Where 'keys' are the
+ *                   PGP signing key(s) (full fingerprint only), if any,
+ *                   that should be downloaded from a keyserver and added
+ *                   to pacman's keyring.
  *
  * All arguments an be passed over STDIN in the
  * form ^<argname>=<value>$ where ^ means start of line and $ means
@@ -112,8 +119,9 @@ static struct argp_option options[] =
 	{"services",  's', "services",  0, "List of systemd services to enable"},
 	{"ext4",      998, "new filesystem label",           OPTION_ARG_OPTIONAL, "Erases the destination volume and writes a new ext4 filesystem. Optionally specify a parameter which will become the new filesystem label."},
 	{"skippacstrap", 999, 0,        0, "Skips pacstrap, to avoid reinstalling all packages if they're already installed"},
-	{"kill",  997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately."},
-	{"postcmd", 996, "postcmd",     0, "Optionally specify a shell command to run after installation. This may be specified multiple times."},
+	{"kill",      997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately."},
+	{"postcmd",   996, "postcmd",     0, "Optionally specify a shell command to run after installation. This may be specified multiple times."},
+	{"repo",      995, "repo",      0, "Specify a pacman repository to add to /etc/pacman.conf on the target machine, in the format \"Name,Server,SigLevel,Keys...\" where keys are full PGP fingerprints to download public keys to add to pacman's keyring."},
 	{0}
 };
 
@@ -122,6 +130,14 @@ const char *argp_program_bug_address = "Aidan Shafran <zelbrium@gmail.com>";
 static char argp_program_doc[] = "An installer for VeltOS (Arch Linux). See top of main.c for detailed instructions on how to use the installer. The program author is not responsible for any damages, including but not limited to exploded computer, caused by this program. Use as root and with caution.";
 
 const guint kMaxSteps = 14;
+
+typedef struct
+{
+	char *name;
+	char *server;
+	char *siglevel;
+	char **keys;
+} Repo;
 
 typedef struct
 {
@@ -139,6 +155,7 @@ typedef struct
 	gboolean writeExt4;
 	gchar *newFSLabel; // Only if writeExt4
 	GList *postcmds;
+	GList *repos;
 	
 	// Running data
 	GCancellable *cancellable;
@@ -236,6 +253,15 @@ static void sigterm_handler(int signum)
 	}
 }
 
+static void free_repo_struct(Repo *r)
+{
+	g_free(r->name);
+	g_free(r->server);
+	g_free(r->siglevel);
+	g_strfreev(r->keys);
+	g_free(r);
+}
+
 
 int main(int argc, char **argv)
 {
@@ -295,8 +321,76 @@ int main(int argc, char **argv)
 	g_clear_object(&d->cancellable);
 	g_free(d->mountPath);
 	g_list_free_full(d->postcmds, g_free);
+	g_list_free_full(d->repos, (GDestroyNotify)free_repo_struct);
 	g_free(d);
 	return code;
+}
+
+static Repo * parse_repo_string(const gchar *arg)
+{
+	// 0,    1,      2,        3...
+	// name, server, siglevel, keys...
+	
+	char **split = g_strsplit(arg, ",", -1);
+	guint length = g_strv_length(split);
+	guint numkeys = length - 3;
+	
+	if(length < 3)
+	{
+		g_strfreev(split);
+		return NULL;
+	}
+	
+	// Make sure all keys specified are valid fingerprints
+	// Also remove spaces and 0x if present
+	for(guint i=3; i<length; ++i)
+	{
+		char *key = g_strstrip(split[i]);
+		guint len = strlen(key);
+		
+		// Remove 0x if it's there
+		if(len >= 2 && key[0] == '0' && (key[1] == 'x' || key[1] == 'X'))
+		{
+			// len+1 to move back NULL terminator too
+			for(guint k=2; k<len+1; ++k)
+				key[k-2] = key[k];
+			len -= 2;
+		}
+		
+		for(guint j=0; j<len; ++j)
+		{
+			if(key[j] == ' ')
+			{
+				for(guint k=j+1; k<len+1; ++k)
+					key[k-1] = key[k];
+				--len;
+				--j;
+			}
+			else if(!g_ascii_isxdigit(key[j]))
+			{
+				g_strfreev(split);
+				return NULL;
+			}
+		}
+		
+		if(len != 40) // The size of a PGP fingerprint
+		{
+			g_strfreev(split);
+			return NULL;
+		}
+	}
+	
+	Repo *r = g_new(Repo, 1);
+	r->name = g_strstrip(split[0]);
+	r->server = g_strstrip(split[1]);
+	r->siglevel = g_strstrip(split[2]);
+	r->keys = g_new(char *, numkeys+1);
+	for(guint i=0; i<numkeys; ++i)
+		r->keys[i] = split[3+i];
+	r->keys[numkeys] = NULL;
+	
+	g_free(split);
+	return r;
 }
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state)
@@ -314,10 +408,21 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 'z': d->zone = arg; break;
 	case 'k': d->packages = arg; break;
 	case 's': d->services = arg; break;
-	case 996: d->postcmds = g_list_append(d->postcmds, arg); break;
-	case 997: d->killfifo = arg; break;
-	case 998: d->writeExt4 = TRUE; d->newFSLabel = arg; break;
 	case 999: d->skipPacstrap = TRUE; break;
+	case 998: d->writeExt4 = TRUE; d->newFSLabel = arg; break;
+	case 997: d->killfifo = arg; break;
+	case 996: d->postcmds = g_list_append(d->postcmds, arg); break;
+	case 995:
+	{
+		Repo *r = parse_repo_string(arg);
+		if(!r)
+		{
+			printf("Invalid repo specified: %s\n", arg);
+			return EINVAL;
+		}
+		d->repos = g_list_prepend(d->repos, r);
+		break;
+	}
 	default: g_free(arg); return ARGP_ERR_UNKNOWN;
 	}
 	return 0;
@@ -490,6 +595,8 @@ static gboolean exitable_chroot(const gchar *path)
 
 static gint start(Data *d)
 {
+	// TODO: Check for internet connection before continuing installer.
+
 	// Get the PARTUUID of the destination drive before
 	// anything else. If anything it helps validate that
 	// it's a real drive. Also I'd rather the install fail
@@ -626,26 +733,127 @@ static gint mount_volume(Data *d)
 	return r;
 }
 
+static gboolean search_file_for_line(FILE *file, const char *search)
+{
+	fseek(file, 0, SEEK_SET);
+
+	// getline updates line and length from
+	// their initial size if necessary.
+	size_t mlength = 100;
+	char *line = malloc(mlength);
+	while(getline(&line, &mlength, file) >= 0)
+	{
+		char *tmp = line;
+		size_t tmplength = strlen(tmp);
+		// Set tmp to the string with no leading/trailing whitespace
+		while(tmp[0] == ' ')
+			++tmp, --tmplength;
+		while(tmp[tmplength-1] == ' ' || tmp[tmplength-1] == '\n')
+			--tmplength;
+		tmp[tmplength] = '\0';
+		
+		if(g_strcmp0(tmp, search) == 0)
+			return TRUE;
+	}
+	return FALSE;
+}
+
 static gint run_pacstrap(Data *d)
 {
+	// Install base first before user packages. That way we can modify
+	// pacman.conf's repository list and download signing keys.
+	if(!d->skipPacstrap)
+	{
+		gint status = RUN(d, NULL, NULL, "pacstrap", d->mountPath, "base");
+		if(status > 0)
+			return status;
+		else if(status < 0)
+			EXIT(d, -status, , "pacstrap failed with code %i.", -status)
+	}
+
+	char *confpath = g_build_path("/", d->mountPath, "etc", "pacman.conf", NULL);
+	char *gpgdir = g_build_path("/", d->mountPath, "etc", "pacman.d", "gnupg", NULL);
+	char *cachedir = g_build_path("/", d->mountPath, "var", "cache", "pacman", "pkg", NULL);
+	
+	if(d->repos)
+	{
+		printf("Adding repos to %s\n", confpath);
+		FILE *conf = fopen(confpath, "a+");
+		
+		for(GList *it=d->repos; it!=NULL; it=it->next)
+		{
+			Repo *repo = it->data;
+			println("Adding repo %s...", repo->name);
+			
+			// Don't add the repo if it's already there
+			char *searchFor = g_strdup_printf("[%s]", repo->name);
+			gboolean found = search_file_for_line(conf, searchFor);
+			g_free(searchFor);
+			
+			if(!found)
+			{
+				fprintf(conf, "\n[%s]\nSigLevel = %s\nServer = %s\n",
+					repo->name,
+					repo->siglevel,
+					repo->server);
+			}
+			
+			println("Downloading signing keys for %s...", repo->name);
+			guint nkeys = g_strv_length(repo->keys);
+			g_message("n keys: %i", nkeys);
+			char **args = g_new(char *, nkeys+7);
+			args[0] = "pacman-key";
+			args[1] = "--keyserver";
+			args[2] = "pgp.mit.edu";
+			args[3] = "--gpgdir";
+			args[4] = gpgdir;
+			args[5] = "--recv-keys";
+			for(guint i=0;i<nkeys;++i)
+				args[6+i] = repo->keys[i];
+			args[nkeys+6] = NULL;
+			for(guint x=0;x<nkeys+6;++x)
+				g_message("%s", args[x]);
+			gint status = run(d, NULL, NULL, (const gchar * const *)args);
+			g_free(args);
+			
+			if(status > 0)
+				return status;
+			else if(status < 0)
+				EXIT(d, -status, , "pacman-key failed with code %i.", -status)
+		}
+		
+		fclose(conf);
+	}
+	
 	if(d->skipPacstrap)
 	{
+		g_free(confpath);
+		g_free(gpgdir);
+		g_free(cachedir);
 		step(d);
 		return run_genfstab(d);
 	}
-		
+	
 	ensure_argument(d, &d->packages, "packages");
-	gchar ** split = g_strsplit(d->packages, " ", -1);
+	char ** split = g_strsplit(d->packages, " ", -1);
 	guint numPackages = 0;
 	for(guint i=0;split[i]!=NULL;++i)
 		if(split[i][0] != '\0') // two spaces between packages create empty splits
 			numPackages++;
 	
-	gchar **args = g_new(gchar *, numPackages + 4);
-	args[0] = "pacstrap";
-	args[1] = d->mountPath;
-	args[2] = "base";
-	for(guint i=0,j=3;split[i]!=NULL;++i)
+	char **args = g_new(gchar *, numPackages + 12);
+	args[0] = "pacman";
+	args[1] = "--noconfirm";
+	args[2] = "--root";
+	args[3] = d->mountPath;
+	args[4] = "--cachedir";
+	args[5] = cachedir;
+	args[6] = "--config";
+	args[7] = confpath;
+	args[8] = "--gpgdir";
+	args[9] = gpgdir;
+	args[10] = "-Syu";
+	for(guint i=0,j=11;split[i]!=NULL;++i)
 	{
 		if(split[i][0] != '\0')
 		{
@@ -654,16 +862,19 @@ static gint run_pacstrap(Data *d)
 			args[j++] = split[i];
 		}
 	}
-	args[numPackages+3] = '\0';
+	args[numPackages+11] = '\0';
 		
 	gint status = run(d, NULL, NULL, (const gchar * const *)args);
 	g_free(args);
 	g_strfreev(split);
+	g_free(confpath);
+	g_free(gpgdir);
+	g_free(cachedir);
 	
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, -status, , "pacstrap failed with code %i.", -status)
+		EXIT(d, -status, , "pacman failed with code %i.", -status)
 	
 	step(d);
 	return run_genfstab(d);
@@ -959,7 +1170,7 @@ static gint create_user(Data *d)
 	}
 	else
 	{
-		gint status = RUN(d, NULL, NULL, "chfn", "-f", d->name);
+		gint status = RUN(d, NULL, NULL, "chfn", "-f", d->name, d->username);
 		
 		if(status > 0)
 			return status;
