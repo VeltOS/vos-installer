@@ -20,6 +20,7 @@ static const CmkNamedColor GrapheneColors[] = {
 };
 
 static CmkWidget *window;
+extern GSubprocess *gInstallerProc;
 
 static void next_page(ClutterActor *current)
 {
@@ -80,10 +81,13 @@ int main(int argc, char **argv)
 	
 	cmk_main();
 	
-	int fifo = open("/tmp/vos-installer-killfifo", O_WRONLY);
-	char x = 'k';
-	write(fifo, &x, 1);
-	close(fifo);
-	unlink("/tmp/vos-installer-killfifo");
+	if(gInstallerProc)
+	{
+		int fifo = open("/tmp/vos-installer-killfifo", O_WRONLY);
+		char x = 'k';
+		write(fifo, &x, 1);
+		close(fifo);
+		unlink("/tmp/vos-installer-killfifo");
+	}
 	return 0;
 }

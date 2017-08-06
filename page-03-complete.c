@@ -20,7 +20,7 @@ struct _PageComplete
 };
 
 static PageComplete *pageComplete = NULL;
-static GSubprocess *gInstallerProc = NULL;
+GSubprocess *gInstallerProc = NULL;
 
 static void on_dispose(GObject *self_);
 static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, ClutterAllocationFlags flags);
@@ -186,7 +186,7 @@ void spawn_installer_process(const gchar *drive, const gchar *name, const gchar 
 
 	// TODO: Maybe randomly generate a name, so that multiple installers
 	// can run simulataneously without their aborts stopping both?
-	mkfifo("/tmp/vos-installer-killfifo", 600);
+	mkfifo("/tmp/vos-installer-killfifo", 0600);
 
 	GError *error = NULL;
 	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error,
