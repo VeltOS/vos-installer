@@ -185,6 +185,7 @@ static gint run_postcmd(Data *d);
 
 static int pgid = 0;
 static gboolean killing = FALSE;
+static gboolean shouldStopImmediately = FALSE; // TRUE if any stop signals should kill this process instead of trying to stop child processes
 
 
 // Can be called from different threads. I don't think race conditions
@@ -198,6 +199,10 @@ static void stopinstall(gboolean wait)
 	
 	// Make sure no new processes start
 	killing = TRUE;
+	
+	if(shouldStopImmediately)
+		exit(1);
+	
 	// rejoin parent's process group, so that 'kill' below doesn't kill us
 	setpgid(0, getpgid(getppid()));
 	// stop all descendants (or those with same pgid)
@@ -595,7 +600,19 @@ static gboolean exitable_chroot(const gchar *path)
 
 static gint start(Data *d)
 {
-	// TODO: Check for internet connection before continuing installer.
+	shouldStopImmediately = TRUE;
+	printf("Checking internet connection...\n");
+	
+	if(system("ping -c1 8.8.8.8 &>/dev/null"))
+	{
+		printf("\nPlease connect to the internet to continue the install.\n");
+		int r = system("until ping -c1 8.8.8.8 &>/dev/null; do sleep 1; done");
+		if(r)
+			return r;
+	}
+	
+	printf("Connection to Google DNS available.\n");
+	shouldStopImmediately = FALSE;
 
 	// Get the PARTUUID of the destination drive before
 	// anything else. If anything it helps validate that
