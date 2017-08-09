@@ -93,18 +93,101 @@
  * changes made.
  */
 
-#include <gio/gio.h>
+#include <unistd.h>
 #include <stdlib.h>
-#include <argp.h>
-#include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
+#include <sys/wait.h>
+#include <sys/prctl.h>
+#include <errno.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
+#include <argp.h>
 #include <libudev.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <glib.h>
+
+typedef struct
+{
+	char *name;
+	char *server;
+	char *siglevel;
+	char **keys;
+} Repo;
+
+typedef struct
+{
+	// Args
+	char *dest;
+	char *hostname;
+	char *username;
+	char *name;
+	char *password;
+	char *locale;
+	char *zone;
+	char *packages;
+	char *services;
+	bool skipPacstrap;
+	bool writeExt4;
+	bool debug;
+	char *newFSLabel; // Only if writeExt4
+	GList *postcmds;
+	GList *repos;
+	
+	// Running data
+	size_t steps;
+	char *mountPath;
+	bool enableSudoWheel;
+	char *killfifo;
+	char *partuuid;
+	char *ofstype; // original fs type before running mkfs.ext4, or NULL if none
+	
+	int selfpipe[2];
+	bool killing;
+} Data;
+
+static error_t parse_arg(int key, char *arg, struct argp_state *state);
+static Repo * parse_repo_string(const char *arg);
+static void * thread_watch_killfifo(void *data);
+static void * thread_watch_parent(void *data);
+static void on_signal(int sig, siginfo_t *siginfo, void *context);
+static void free_repo_struct(Repo *r);
+static int set_nonblock(int fd);
+static void step(Data *d);
+static int run(int *out, const char * const *args);
+static int run_shell(int *out, const char *command);
+static void ensure_argument(Data *d, char **arg, const char *argname);
+static int start(Data *d);
+static int run_ext4(Data *d);
+static int mount_volume(Data *d);
+static int run_pacstrap(Data *d);
+static int run_genfstab(Data *d);
+static int run_chroot(Data *d);
+static int set_passwd(Data *d);
+static int set_locale(Data *d);
+static int set_zone(Data *d);
+static int set_hostname(Data *d);
+static int create_user(Data *d);
+static int enable_services(Data *d);
+static int run_postcmd(Data *d);
+
+#define println(fmt...) { printf(fmt); printf("\n"); }
+
+#define NONBLOCK(fd) fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK)
+
+#define FAIL(code, x, fmt...) { \
+	println(fmt); \
+	x; \
+	return code; \
+}
+
+// Use like: int status = RUN(..)
+#define RUN(out, args...) 0; { \
+	char *argv [] = {args, NULL}; \
+	status = run(out, (const char * const *)argv); \
+}
 
 static struct argp_option options[] =
 {
@@ -122,6 +205,7 @@ static struct argp_option options[] =
 	{"kill",      997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately."},
 	{"postcmd",   996, "postcmd",     0, "Optionally specify a shell command to run after installation. This may be specified multiple times."},
 	{"repo",      995, "repo",      0, "Specify a pacman repository to add to /etc/pacman.conf on the target machine, in the format \"Name,Server,SigLevel,Keys...\" where keys are full PGP fingerprints to download public keys to add to pacman's keyring."},
+	{"debug",      994, 0,      0, "specify to enable debug mode"},
 	{0}
 };
 
@@ -129,178 +213,30 @@ const char *argp_program_version = "vos-install-cli 0.1";
 const char *argp_program_bug_address = "Aidan Shafran <zelbrium@gmail.com>";
 static char argp_program_doc[] = "An installer for VeltOS (Arch Linux). See top of main.c for detailed instructions on how to use the installer. The program author is not responsible for any damages, including but not limited to exploded computer, caused by this program. Use as root and with caution.";
 
-const guint kMaxSteps = 14;
-
-typedef struct
-{
-	char *name;
-	char *server;
-	char *siglevel;
-	char **keys;
-} Repo;
-
-typedef struct
-{
-	// Args
-	gchar *dest;
-	gchar *hostname;
-	gchar *username;
-	gchar *name;
-	gchar *password;
-	gchar *locale;
-	gchar *zone;
-	gchar *packages;
-	gchar *services;
-	gboolean skipPacstrap;
-	gboolean writeExt4;
-	gchar *newFSLabel; // Only if writeExt4
-	GList *postcmds;
-	GList *repos;
-	
-	// Running data
-	GCancellable *cancellable;
-	guint steps;
-	gchar *mountPath;
-	gboolean enableSudoWheel;
-	char *killfifo;
-	char *partuuid;
-	char *ofstype; // original fs type before running mkfs.ext4, or NULL if none
-} Data;
-
-static error_t parse_arg(int key, char *arg, struct argp_state *state);
-static void progress(Data *d);
-static gint start(Data *d);
-static gint run_ext4(Data *d);
-static gint mount_volume(Data *d);
-static gint run_pacstrap(Data *d);
-static gint run_genfstab(Data *d);
-static gint run_chroot(Data *d);
-static gint set_passwd(Data *d);
-static gint set_locale(Data *d);
-static gint set_zone(Data *d);
-static gint set_hostname(Data *d);
-static gint create_user(Data *d);
-static gint enable_services(Data *d);
-static gint run_postcmd(Data *d);
-
-static int pgid = 0;
-static gboolean killing = FALSE;
-static gboolean shouldStopImmediately = FALSE; // TRUE if any stop signals should kill this process instead of trying to stop child processes
-
-
-// Can be called from different threads. I don't think race conditions
-// are a problem here (between checking 'killing' and setting it to TRUE)
-// since pgid is set at program start, and it's just killing everything
-// everything anyway.
-static void stopinstall(gboolean wait)
-{
-	if(killing)
-		return;
-	
-	// Make sure no new processes start
-	killing = TRUE;
-	
-	if(shouldStopImmediately)
-		exit(1);
-	
-	// rejoin parent's process group, so that 'kill' below doesn't kill us
-	setpgid(0, getpgid(getppid()));
-	// stop all descendants (or those with same pgid)
-	kill(-pgid, SIGINT);
-	if(wait)
-	{
-		// Wait 1 second; if the process did get killed, the program
-		// should exit before this finishes
-		sleep(1);
-		// try again
-		kill(-pgid, SIGKILL);
-	}
-}
-
-// Thread
-// Wait for data to be sent to the killfifo
-static void * killfifo_watch(void *path)
-{
-	int fifo = open((const char *)path, O_RDONLY);
-	char x[2];
-	x[0] = '\0';
-	x[1] = '\0';
-	read(fifo, &x, 1);
-	stopinstall(TRUE);
-	return NULL;
-}
-
-// Thread
-// Constantly make sure the parent doesn't change (will
-// happen if the original parent dies). If it does, abort.
-static void * parent_watch(void *data)
-{
-	int ppid = getppid();
-	do
-	{
-		sleep(1);
-	} while(getppid() == ppid);
-	printf("\nParent changed, stopping install\n\n");
-	stopinstall(TRUE);
-}
-
-static void sigterm_handler(int signum)
-{
-	//printf("\nReceived %i, stopping install\n\n", signum);
-	static gboolean called = FALSE;
-	if(called)
-		exit(1);
-	else
-	{
-		// Don't wait; a user who presses ctrl+c will see a delay
-		stopinstall(FALSE);
-		called = TRUE;
-	}
-}
-
-static void free_repo_struct(Repo *r)
-{
-	g_free(r->name);
-	g_free(r->server);
-	g_free(r->siglevel);
-	g_strfreev(r->keys);
-	g_free(r);
-}
+static const size_t kMaxSteps = 16;
+static Data *d;
 
 
 int main(int argc, char **argv)
 {
+	int code;
+	
 	// Don't buffer stdout, seems to mess with GSubprocess/GInputStream
 	setbuf(stdout, NULL);
 
-	// New process group, for killfifo
-	setpgid(0, 0);
-	pgid = getpgid(0);
-
-	// Watch for int/term/hup
-	signal(SIGHUP, sigterm_handler);
-	signal(SIGINT, sigterm_handler);
-	signal(SIGTERM, sigterm_handler);
-	// TODO: Use sigaction, since apparently signal() has
-	// undefined behavior when multiple threads are involved.
-	//struct sigaction act;
-	//act.sa_sigaction = sigio;
-	//sigemptyset(&act.sa_mask);
-	//act.sa_flags = SA_SIGINFO;
-	//sigaction(SIGIO, &act, NULL);
-
-	Data *d = g_new0(Data, 1);
+	// Parse arguments
+	d = g_new0(Data, 1);
 	static struct argp argp = {options, parse_arg, NULL, argp_program_doc};
 	error_t error;
 	if((error = argp_parse(&argp, argc, argv, 0, 0, d)))
-		return error;
+	{
+		println("Invalid arguments (%i)", error);
+		code = 1;
+		goto exit;
+	}
 	
-	pthread_t p, p2;
-	
-	if(d->killfifo)
-		pthread_create(&p, NULL, killfifo_watch, d->killfifo);
-	pthread_create(&p2, NULL, parent_watch, NULL);
-
+	// Check if any command line arguments are NONE and replace them
+	// with "" so that ensure_argument knows they have been set
 	#define REPL_NONE(val) if(g_strcmp0(val, "NONE") == 0) { g_free(val); val = g_strdup(""); }
 	REPL_NONE(d->hostname);
 	REPL_NONE(d->username);
@@ -311,9 +247,64 @@ int main(int argc, char **argv)
 	REPL_NONE(d->packages);
 	REPL_NONE(d->services);
 	#undef REPL_NONE
+
+	// Setup selfpipe
+	// Nonblocking because a blocking write() in the signal handler,
+	// waiting for a read in the main thread = deadlock
+	errno = 0;
+	if(pipe(d->selfpipe)
+	|| NONBLOCK(d->selfpipe[0]) == -1
+	|| NONBLOCK(d->selfpipe[1]) == -1)
+	{
+		println("Error creating selfpipe (%i)", errno);
+		code = 1;
+		goto exit;
+	}
+
+	// Watch for stop signals
+	sigset_t bsigs;
+	sigemptyset(&bsigs);
+	sigaddset(&bsigs, SIGINT);
+	sigaddset(&bsigs, SIGTERM);
+	sigaddset(&bsigs, SIGHUP);
+	sigaddset(&bsigs, SIGCHLD);
 	
-	gint code = start(d);
+	struct sigaction act = {0};
+	act.sa_sigaction = on_signal;
+	act.sa_flags = SA_SIGINFO;
+	act.sa_mask = bsigs;
+	if(sigaction(SIGINT, &act, NULL)
+	|| sigaction(SIGTERM, &act, NULL)
+	|| sigaction(SIGHUP, &act, NULL)
+	|| sigaction(SIGCHLD, &act, NULL))
+	{
+		println("Failed to setup signal handlers! Aborting just to be safe.");
+		code = 1;
+		goto exit;
+	}
+
+	// According to POSIX (see pthread(7) man page), when a signal
+	// arrives at a process, a thread is arbitrarily selected to
+	// receive the signal. It appears that on Linux, that is always
+	// the program's main thread. But it doesn't have to be, so to
+	// make sure, temporarily block the signals we're interested in,
+	// so that the other threads inherit the block mask. Then, after
+	// spawning the threads, unblock the signals on this thread.
+	pthread_sigmask(SIG_BLOCK, &bsigs, NULL);
 	
+	// Start threads to monitor for abort conditions
+	pthread_t p, p2;
+	if(d->killfifo)
+		pthread_create(&p, NULL, thread_watch_killfifo, NULL);
+	pthread_create(&p2, NULL, thread_watch_parent, NULL);
+	
+	// Unblock blocked signals
+	pthread_sigmask(SIG_UNBLOCK, &bsigs, NULL);
+
+	// Begin installation
+	code = start(d);
+
+exit:
 	g_free(d->dest);
 	g_free(d->hostname);
 	g_free(d->username);
@@ -323,7 +314,6 @@ int main(int argc, char **argv)
 	g_free(d->zone);
 	g_free(d->packages);
 	g_free(d->services);
-	g_clear_object(&d->cancellable);
 	g_free(d->mountPath);
 	g_list_free_full(d->postcmds, g_free);
 	g_list_free_full(d->repos, (GDestroyNotify)free_repo_struct);
@@ -331,14 +321,50 @@ int main(int argc, char **argv)
 	return code;
 }
 
-static Repo * parse_repo_string(const gchar *arg)
+static error_t parse_arg(int key, char *arg, struct argp_state *state)
+{
+	Data *d = state->input;
+	arg = g_strdup(arg);
+	switch (key)
+	{
+	case 'd': d->dest = arg; break;
+	case 'h': d->hostname = arg; break;
+	case 'u': d->username = arg; break;
+	case 'n': d->name = arg; break;
+	case 'p': d->password = arg; break;
+	case 'l': d->locale = arg; break;
+	case 'z': d->zone = arg; break;
+	case 'k': d->packages = arg; break;
+	case 's': d->services = arg; break;
+	case 999: d->skipPacstrap = true; break;
+	case 998: d->writeExt4 = true; d->newFSLabel = arg; break;
+	case 997: d->killfifo = arg; break;
+	case 996: d->postcmds = g_list_append(d->postcmds, arg); break;
+	case 995:
+	{
+		Repo *r = parse_repo_string(arg);
+		if(!r)
+		{
+			println("Invalid repo specified: %s", arg);
+			return EINVAL;
+		}
+		d->repos = g_list_prepend(d->repos, r);
+		break;
+	}
+	case 994: d->debug = TRUE; break;
+	default: g_free(arg); return ARGP_ERR_UNKNOWN;
+	}
+	return 0;
+}
+
+static Repo * parse_repo_string(const char *arg)
 {
 	// 0,    1,      2,        3...
 	// name, server, siglevel, keys...
 	
 	char **split = g_strsplit(arg, ",", -1);
-	guint length = g_strv_length(split);
-	guint numkeys = length - 3;
+	size_t length = g_strv_length(split);
+	size_t numkeys = length - 3;
 	
 	if(length < 3)
 	{
@@ -348,25 +374,25 @@ static Repo * parse_repo_string(const gchar *arg)
 	
 	// Make sure all keys specified are valid fingerprints
 	// Also remove spaces and 0x if present
-	for(guint i=3; i<length; ++i)
+	for(size_t i=3; i<length; ++i)
 	{
 		char *key = g_strstrip(split[i]);
-		guint len = strlen(key);
+		size_t len = strlen(key);
 		
 		// Remove 0x if it's there
 		if(len >= 2 && key[0] == '0' && (key[1] == 'x' || key[1] == 'X'))
 		{
 			// len+1 to move back NULL terminator too
-			for(guint k=2; k<len+1; ++k)
+			for(size_t k=2; k<len+1; ++k)
 				key[k-2] = key[k];
 			len -= 2;
 		}
 		
-		for(guint j=0; j<len; ++j)
+		for(size_t j=0; j<len; ++j)
 		{
 			if(key[j] == ' ')
 			{
-				for(guint k=j+1; k<len+1; ++k)
+				for(size_t k=j+1; k<len+1; ++k)
 					key[k-1] = key[k];
 				--len;
 				--j;
@@ -390,7 +416,7 @@ static Repo * parse_repo_string(const gchar *arg)
 	r->server = g_strstrip(split[1]);
 	r->siglevel = g_strstrip(split[2]);
 	r->keys = g_new(char *, numkeys+1);
-	for(guint i=0; i<numkeys; ++i)
+	for(size_t i=0; i<numkeys; ++i)
 		r->keys[i] = split[3+i];
 	r->keys[numkeys] = NULL;
 	
@@ -398,135 +424,224 @@ static Repo * parse_repo_string(const gchar *arg)
 	return r;
 }
 
-static error_t parse_arg(int key, char *arg, struct argp_state *state)
+// Wait for data to be sent to the killfifo
+static void * thread_watch_killfifo(void *data)
 {
-	Data *d = state->input;
-	arg = g_strdup(arg);
-	switch (key)
+	int fifo = open(d->killfifo, O_RDONLY);
+	char x[2];
+	x[0] = '\0';
+	x[1] = '\0';
+	while(1)
 	{
-	case 'd': d->dest = arg; break;
-	case 'h': d->hostname = arg; break;
-	case 'u': d->username = arg; break;
-	case 'n': d->name = arg; break;
-	case 'p': d->password = arg; break;
-	case 'l': d->locale = arg; break;
-	case 'z': d->zone = arg; break;
-	case 'k': d->packages = arg; break;
-	case 's': d->services = arg; break;
-	case 999: d->skipPacstrap = TRUE; break;
-	case 998: d->writeExt4 = TRUE; d->newFSLabel = arg; break;
-	case 997: d->killfifo = arg; break;
-	case 996: d->postcmds = g_list_append(d->postcmds, arg); break;
-	case 995:
-	{
-		Repo *r = parse_repo_string(arg);
-		if(!r)
-		{
-			printf("Invalid repo specified: %s\n", arg);
-			return EINVAL;
-		}
-		d->repos = g_list_prepend(d->repos, r);
-		break;
+		read(fifo, &x, 1);
+		kill(getpid(), SIGINT);
+		// TODO: Clear and/or request user only send one char of data
 	}
-	default: g_free(arg); return ARGP_ERR_UNKNOWN;
-	}
-	return 0;
+	return NULL;
 }
 
-#define println(fmt, ...) printf(fmt "\n", __VA_ARGS__)
-
-static inline void progress(Data *d)
+// Constantly make sure the parent doesn't change (will
+// happen if the original parent dies). If it does, abort.
+static void * thread_watch_parent(void *data)
 {
+	int ppid = getppid();
+	do
+	{
+		sleep(1);
+	} while(getppid() == ppid);
+	println("\nParent changed, stopping install to be safe\n");
+	kill(getpid(), SIGINT);
+	return NULL;
+}
+
+static void on_signal(int sig, siginfo_t *siginfo, void *context)
+{
+	if(sig != SIGCHLD)
+		d->killing = true;
+	
+	// To avoid some race conditions, also use a selfpipe to
+	// inform of these signals.
+	int savederr = errno;
+	(void)write(d->selfpipe[1], "", 1);
+	errno = savederr;
+}
+
+static void free_repo_struct(Repo *r)
+{
+	g_free(r->name);
+	g_free(r->server);
+	g_free(r->siglevel);
+	g_strfreev(r->keys);
+	g_free(r);
+}
+
+static void step(Data *d)
+{
+	d->steps++;
 	println("PROGRESS %f", (gfloat)(d)->steps / kMaxSteps);
 }
 
-static inline void step(Data *d)
-{
-	d->steps++;
-	progress(d);
-}
-
-
-#define EXIT(d, code, x, fmt...) { \
-	progress(d); \
-	println(fmt, 0); \
-	x; \
-	return code; \
-}
-
-// Use like: gint status = RUN(..)
-#define RUN(d, process, sout, args...) 0; { \
-	gchar *argv [] = {args, NULL}; \
-	status = run(d, process, sout, (const gchar * const *)argv); \
-}
-
+// Run a process. If an exit signal comes though, try to give the
+// process a little bit of time to exit, and if it doesn't die in
+// time, force kill it.
+// Supply a integer to store the read end of a pipe if the child's
+// output should be redirected to that pipe, or NULL to keep output
+// at stdout. run still waits for the child to exit before returning
+// even if a pipe is supplied.
 // Returns the process's exit code as a negative, to distinugish a child
-// process error (possibly not fatal) from a GSubprocess error (fatal).
-// If stdout is non-NULL, then process must also be non-NULL, and the caller
-// must call g_object_unref on process after using the stdout stream.
-static gint run(Data *d, GSubprocess **process, GInputStream **sout, const gchar * const *args)
+// process error (possibly not fatal) from a fork/abort error (fatal).
+static int run_full(int *out, bool mute, const char * const *args)
 {
-	if(killing)
-		return 1;
+	if(d->killing)
+		FAIL(errno, , "Install aborted")
 	
-	if(process) *process = NULL;
-	if(sout) *sout = NULL;
-	
-	gchar *cmd = g_strjoinv(" ", (gchar **)args);
-	println("Running: %s", cmd);
-	g_free(cmd);
-	
-	GError *error = NULL;
-	GSubprocess *proc = g_subprocess_newv(args, sout ? (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE) : G_SUBPROCESS_FLAGS_NONE, &error);
-	
-	if(error)
-		EXIT(d, 1, g_error_free(error), "%s", error->message)
-	
-	if(!g_subprocess_wait(proc, d->cancellable, &error) || error)
+	if(d->debug || !mute)
 	{
-		if(error)
-			EXIT(d, 1, g_object_unref(proc);g_error_free(error), "%s", error->message)
-		EXIT(d, 1, , "Process cancelled")
+		char *cmd = g_strjoinv(" ", (char **)args);
+		println("Running: %s", cmd);
+		g_free(cmd);
+	}
+
+	if(d->debug)
+	{
+		printf("Continue? (y/n) ");
+		char *line = NULL;
+		size_t len = 0;
+		if(getline(&line, &len, stdin) == -1)
+			exit(1);
+		if(g_strcmp0(line, "y\n") != 0)
+			exit(1);
+	}
+
+	int fd[2];
+	if(out)
+	{
+		*out = 0;
+		if(pipe(fd) || NONBLOCK(fd[0]) || NONBLOCK(fd[1]))
+			FAIL(errno, , "Failed to open pipe")
+		*out = fd[0];
 	}
 	
-	int exit = 1;
-	if(g_subprocess_get_if_exited(proc))
-		exit = g_subprocess_get_exit_status(proc);
-	else
-		println("Process aborted (signal: %i)", g_subprocess_get_if_signaled(proc) ? g_subprocess_get_term_sig(proc) : 0);
+	// Spawn new process
+	errno = 0;
+	pid_t ppid = getpid();
+	pid_t pid = fork();
 	
-	if(sout)
-		*sout = g_subprocess_get_stdout_pipe(proc);
-	if(process)
-		*process = proc;
+	if(pid == -1)
+	{
+		FAIL(errno, , "Failed to fork new process")
+	}
+	else if(pid == 0) // Child process
+	{
+		// Give the child its own process group
+		setpgrp();
+		
+		// Redirect child's STDOUT/ERR to pipe if requested
+		if(out)
+		{
+			close(fd[0]);
+			dup2(fd[1], STDOUT_FILENO);
+			dup2(fd[1], STDERR_FILENO);
+		}
+		
+		// Child processes should be killed cleanly, but just incase
+		// something bad happens (parent segfaults or SIGKILL'd), this
+		// is a last resort to get the child to die.
+		if(prctl(PR_SET_PDEATHSIG, SIGHUP))
+			abort();
+		// Prevent race condition of parent dying before prctl is called
+		if(getppid() != ppid)
+			abort();
+		
+		execvp(args[0], (char * const *)args);
+		abort();
+	}
+
+	if(out)
+		close(fd[1]);
+
+	// Wait for process to exit, or something to go wrong
+	// Loop to handle EINTR.
+	int exitstatus = 0;
+	while(1)
+	{
+		// This will wait for any signal, or exit immediately
+		// if we should be aborting. This avoids a race condition
+		// between checking d->killing and waitpid.
+		fd_set rfds;
+		FD_ZERO(&rfds);
+		FD_SET(d->selfpipe[0], &rfds);
+		errno = 0;
+		select(d->selfpipe[0]+1, &rfds, NULL, NULL, NULL);
+		if(errno != 0 && errno != EINTR)
+			d->killing = true;
+		static char dummy[PIPE_BUF];
+		while(read(d->selfpipe[0], dummy, sizeof(dummy)) > 0);
+		
+		if(!d->killing)
+		{
+			errno = 0;
+			if(waitpid(pid, &exitstatus, WNOHANG) > 0)
+				break;
+			else if(errno == 0 || errno == EINTR) // 0 for WNOHANG
+				continue;
+		}
+		
+		// Something went wrong; stop the child process.
+		kill(-getpgid(pid), SIGINT);
+		
+		println("Waiting 1s for child process to exit...");
+		
+		// Give the process time to cleanly exit. If it does,
+		// SIGCHLD will interrupt the sleep.
+		// If the user sends another interrupt during this time,
+		// it will also exit the sleep. (Assume two interrupts =
+		// they really want it dead)
+		sleep(1);
+		
+		// Death
+		kill(-getpgid(pid), SIGKILL);
+		waitpid(pid, NULL, 0);
+		
+		if(d->killing)
+			FAIL(1, , "Install aborted")
+		else
+			FAIL(errno, , "Error monitoring process")
+	}
+
+	int exit = 1;
+	if(WIFEXITED(exitstatus))
+		exit = WEXITSTATUS(exitstatus);
 	else
-		g_object_unref(proc);
+		println("Process aborted (signal: %i)", WIFSIGNALED(exitstatus) ? WTERMSIG(exitstatus) : 0);
 	return (-exit);
+}
+
+static int run(int *out, const char * const *args)
+{
+	return run_full(out, FALSE, args);
+}
+
+static int run_shell(int *out, const char *command)
+{
+	const char *args[] = {"sh", "-c", command, NULL};
+	return run_full(out, TRUE, args);
 }
 
 // Checks if the arg is available (non-NULL)
 // If it isn't, reads and parses STDIN until it is non-NULL
-static void ensure_argument(Data *d, gchar **arg, const gchar *argname)
+static void ensure_argument(Data *d, char **arg, const char *argname)
 {
 	if(*arg == NULL)
 		println("WAITING %s", argname);
-	GIOChannel *ch = NULL; 
 	while(*arg == NULL)
 	{
-		gchar *line = NULL;
-		gsize len = 0;
-		//char *line = NULL;
-		//size_t size;
-		//if(getline(&line, &size, stdin) == -1)
-		//	exit(1);
-		//g_message("got line");
-		if(!ch) ch = g_io_channel_unix_new(STDIN_FILENO);
-		if(g_io_channel_read_line(ch, &line, &len, NULL, NULL) != G_IO_STATUS_NORMAL)
+		char *line = NULL;
+		size_t len = 0;
+		if(getline(&line, &len, stdin) == -1)
 			exit(1);
-		if(!line)
-			continue;
 		
-		// +2 because g_io_channel_read_line includes the \n at the end
+		// +2 because getline includes the \n at the end
 		#define TRY(x, n) if(len >= ((n)+2) && !d->x && strncmp(line, #x "=", (n)+1) == 0) { d->x = g_strstrip(g_strndup(line+((n)+1), len-((n)+2))); }
 		TRY(password, 8)
 		else TRY(dest, 4)
@@ -539,13 +654,7 @@ static void ensure_argument(Data *d, gchar **arg, const gchar *argname)
 		else TRY(services, 8)
 		#undef TRY
 	}
-	
-	if(ch) g_io_channel_unref(ch);
 }
-
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 
 // Works similarly to chroot, with two exceptions:
 // 1) This automatically changes working directory to
@@ -560,24 +669,24 @@ static void ensure_argument(Data *d, gchar **arg, const gchar *argname)
 //  exitable_chroot(NULL);
 // Would leave you at the root of where /a exists, not
 // the root where /b exists.
-// Returns TRUE on success. On failure, the working directory
+// Returns true on success. On failure, the working directory
 // may be changed, but the chroot will not be.
-static gboolean exitable_chroot(const gchar *path)
+static bool exitable_chroot(const char *path)
 {
 	static int originalRoot = -1;
 	if(originalRoot < 0)
 		originalRoot = open("/", O_RDONLY);
 	if(originalRoot < 0)
-		return FALSE;
+		return false;
 	
 	int tmpcwd = open(".", O_RDONLY);
 	if(tmpcwd < 0)
-		return FALSE;
+		return false;
 	
 	if((path && chdir(path)) || (!path && fchdir(originalRoot)))
 	{
 		close(tmpcwd);
-		return FALSE;
+		return false;
 	}
 	
 	if(chroot("."))
@@ -586,7 +695,7 @@ static gboolean exitable_chroot(const gchar *path)
 		// in which case the cwd might change.
 		fchdir(tmpcwd);
 		close(tmpcwd);
-		return FALSE;
+		return false;
 	}
 
 	close(tmpcwd);
@@ -595,24 +704,21 @@ static gboolean exitable_chroot(const gchar *path)
 		close(originalRoot);
 		originalRoot = -1;
 	}
-	return TRUE;
+	return true;
 }
 
-static gint start(Data *d)
+static int start(Data *d)
 {
-	shouldStopImmediately = TRUE;
-	printf("Checking internet connection...\n");
+	println("Checking internet connection...");
 	
-	if(system("ping -c1 8.8.8.8 &>/dev/null"))
+	if(run_shell(0, "ping -c1 8.8.8.8 &>/dev/null"))
 	{
-		printf("\nPlease connect to the internet to continue the install.\n");
-		int r = system("until ping -c1 8.8.8.8 &>/dev/null; do sleep 1; done");
-		if(r)
-			return r;
+		println("\nPlease connect to the internet to continue the install.");
+		if(run_shell(0, "until ping -c1 8.8.8.8 &>/dev/null; do sleep 1; done"))
+			return 1;
 	}
 	
-	printf("Connection to Google DNS available.\n");
-	shouldStopImmediately = FALSE;
+	println("Connection to Google DNS available.");
 
 	// Get the PARTUUID of the destination drive before
 	// anything else. If anything it helps validate that
@@ -623,7 +729,7 @@ static gint start(Data *d)
 	
 	struct udev *udev = udev_new();
 	if(!udev)
-		EXIT(d, 1, , "udev unavailable", 1)
+		FAIL(1, , "udev unavailable", 1)
 	
 	// Apparently no way to get a udev_device by its devnode
 	struct udev_enumerate *enumerate = udev_enumerate_new(udev);
@@ -644,18 +750,18 @@ static gint start(Data *d)
 	}
 	
 	if(!dev)
-		EXIT(d, 1, udev_unref(udev), "Destination device not found.", 1)
+		FAIL(1, udev_unref(udev), "Destination device not found.", 1)
 	
 	d->partuuid = g_strdup(udev_device_get_property_value(dev, "ID_PART_ENTRY_UUID"));
 	if(!d->partuuid)
-		EXIT(d, 1, udev_unref(udev), "PARTUUID not found.", 1)
+		FAIL(1, udev_unref(udev), "PARTUUID not found.", 1)
 	d->ofstype = g_strdup(udev_device_get_property_value(dev, "ID_FS_TYPE"));
 	udev_unref(udev);
 	
 	return run_ext4(d);
 }
 
-static gint run_ext4(Data *d)
+static int run_ext4(Data *d)
 {
 	if(!d->writeExt4)
 	{
@@ -665,33 +771,33 @@ static gint run_ext4(Data *d)
 	
 	ensure_argument(d, &d->dest, "dest");
 	
-	gint status = RUN(d, NULL, NULL, "udisksctl", "unmount", "-b", d->dest);
+	int status = RUN(NULL, "udisksctl", "unmount", "-b", d->dest);
 	// Don't worry if this fails, since it might not have been mounted at all
 	//if(status > 0)
 	//	return status;
 	//else if(status < 0)
-	//	EXIT(d, -status, , "Unmount failed with code %i.", -status)
+	//	FAIL(-status, , "Unmount failed with code %i.", -status)
 	
-	status = RUN(d, NULL, NULL, "mkfs.ext4", d->dest);
+	status = RUN(NULL, "mkfs.ext4", "-F", d->dest);
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, -status, , "mkfs.ext4 failed with code %i.", -status)
+		FAIL(-status, , "mkfs.ext4 failed with code %i.", -status)
 	
 	if(d->newFSLabel)
 	{
-		status = RUN(d, NULL, NULL, "e2label", d->dest, d->newFSLabel);
+		status = RUN(NULL, "e2label", d->dest, d->newFSLabel);
 		if(status > 0)
 			return status;
 		else if(status < 0)
-			EXIT(d, -status, , "e2label failed with code %i.", -status)
+			FAIL(-status, , "e2label failed with code %i.", -status)
 	}
 	
 	step(d);
 	return mount_volume(d);
 }
 
-static gint mount_volume(Data *d)
+static int mount_volume(Data *d)
 {
 	ensure_argument(d, &d->dest, "dest");
 	
@@ -699,58 +805,118 @@ static gint mount_volume(Data *d)
 	// unique spot, unlike simply mounting at /mnt.
 	// Could do this with udisks dbus API but lazy.
 	
-	GInputStream *sout = NULL;
-	GSubprocess *proc = NULL;
-	gint status = RUN(d, &proc, &sout, "udisksctl", "mount", "-b", d->dest);
+	int rfd;
+	int status = RUN(&rfd, "udisksctl", "mount", "-b", d->dest);
 	if(status > 0)
 		return status;
 	status = -status;
-	gchar buf[1024];
-	gsize num = g_input_stream_read(sout, buf, 1024, NULL, NULL);
-	g_object_unref(proc);
 	
-	gboolean alreadyMounted = FALSE;
+	char buf[1024];
+	int num = read(rfd, buf, sizeof(buf));
+	
+	bool alreadyMounted = false;
 	if(status == 0)
 	{
-		gchar *phrase = g_strdup_printf("Mounted %s at", d->dest);
+		char *phrase = g_strdup_printf("Mounted %s at", d->dest);
 		int phraseLen = strlen(phrase);
-		const gchar *loc = g_strstr_len(buf, num, phrase);
+		const char *loc = g_strstr_len(buf, num, phrase);
 		g_free(phrase);
 		if(!loc)
-			EXIT(d, status, , "Unexpected output: %.*s", num, buf);
+			FAIL(status, , "Unexpected output: %.*s", num, buf);
 		loc += phraseLen + 1; // +1 for space
-		const gchar *end = strchr(loc, '.');
+		const char *end = strchr(loc, '.');
 		if(!end)
-			EXIT(d, status, , "Unexpected output: %.*s", num, buf);
+			FAIL(status, , "Unexpected output: %.*s", num, buf);
 		d->mountPath = g_strndup(loc, (end-loc));
 	}
 	else
 	{
 		static char phrase[] = "already mounted at";
-		const gchar *loc = g_strstr_len(buf, num, phrase);
+		const char *loc = g_strstr_len(buf, num, phrase);
 		if(!loc)
-			EXIT(d, status, , "Mount failed: %.*s", num, buf);
+			FAIL(status, , "Mount failed: %.*s", num, buf);
 		loc += sizeof(phrase) + 1; // +1 for " `", and the other +1 is the NULL byte
-		const gchar *end = strchr(loc, '\'');
+		const char *end = strchr(loc, '\'');
 		if(!end)
-			EXIT(d, status, , "Unexpected output: %.*s", num, buf);
+			FAIL(status, , "Unexpected output: %.*s", num, buf);
 		d->mountPath = g_strndup(loc, (end-loc));
 		println("%s already mounted", d->dest);
-		alreadyMounted = TRUE;
+		alreadyMounted = true;
 	}
 	
 	println("Mounted at %s", d->mountPath);
 	step(d);
-	gint r = run_pacstrap(d);
+
+	if(chdir(d->mountPath))
+		FAIL(errno, , "Failed to chdir to mount path")
+
+	println("Creating directories");
+	
+	#define TRY_MKDIR(path, mode) { if(mkdir(path, mode) && errno != EEXIST) FAIL(errno,, "Failed to mkdir %s/" path, d->mountPath) }
+	TRY_MKDIR("etc", 0755)
+	TRY_MKDIR("run", 0755)
+	TRY_MKDIR("dev", 0755)
+	TRY_MKDIR("var", 0755)
+	TRY_MKDIR("var/cache", 0755)
+	TRY_MKDIR("var/cache/pacman", 0755)
+	TRY_MKDIR("var/cache/pacman/pkg", 0755)
+	TRY_MKDIR("var/lib", 0755)
+	TRY_MKDIR("var/lib/pacman", 0755)
+	TRY_MKDIR("var/log", 0755)
+	TRY_MKDIR("tmp", 1777)
+	TRY_MKDIR("sys", 0555)
+	TRY_MKDIR("proc", 0555)
+	#undef TRY_MKDIR
+	
+	println("Mounting temporary filesystems");
+
+	#define TRY_MOUNT(s, t, fs, f, data) { if(mount(s, t, fs, f, data) && errno != EBUSY) FAIL(errno, , "Failed to mount %s/" t, d->mountPath) }
+	TRY_MOUNT("proc", "proc", "proc", MS_NOSUID|MS_NOEXEC|MS_NODEV, "")
+	TRY_MOUNT("sys", "sys", "sysfs", MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_RDONLY, "")
+	mount("efivarfs", "sys/firmware/efi/efivars", "efivarfs", MS_NOSUID|MS_NOEXEC|MS_NODEV, "");
+	TRY_MOUNT("udev", "dev", "devtmpfs", MS_NOSUID, "mode=0755")
+	TRY_MOUNT("devpts", "dev/pts", "devpts", MS_NOSUID|MS_NOEXEC, "gid=5,mode=0620")
+	TRY_MOUNT("shm", "dev/shm", "tmpfs", MS_NOSUID|MS_NODEV, "mode=1777")
+	TRY_MOUNT("run", "run", "tmpfs", MS_NOSUID|MS_NODEV, "mode=0755")
+	TRY_MOUNT("tmp", "tmp", "tmpfs", MS_NOSUID|MS_NODEV|MS_STRICTATIME, "mode=1777")
+	#undef TRY_MOUNT
+	
+	// Continue install
+	int r = run_pacstrap(d);
+
+	// Cleanup
+
+	// gpg-agent is a piece o' trash and loves to just hang around after
+	// running pacman-key, and it keeps the drive from being unmounted.
+	// XXX: Probably a better solution than this
+	status = RUN(NULL, "killall", "-u", "root", "gpg-agent");
+
+	println("Unmounting temporary filesystems");
+	errno = 0;
+	if(!chdir(d->mountPath))
+	{
+		umount("tmp");
+		umount("run");
+		umount("dev/shm");
+		umount("dev/pts");
+		umount("dev");
+		umount("sys/firmware/efi/efivars");
+		umount("sys");
+		umount("proc");
+	}
+	if(errno)
+		println("Warning: Failed to unmount some. You may have to do this manually.");
+
 	if(!alreadyMounted)
 	{
-		printf("Unmounting volume\n");
-		status = RUN(d, NULL, NULL, "udisksctl", "unmount", "-b", d->dest);
+		println("Unmounting volume");
+		// udisksctl not necessary for unmount
+		umount2(".", MNT_DETACH); // Lazy unmount
 	}
 	return r;
 }
 
-static gboolean search_file_for_line(FILE *file, const char *search)
+static bool search_file_for_line(FILE *file, const char *search)
 {
 	fseek(file, 0, SEEK_SET);
 
@@ -770,31 +936,64 @@ static gboolean search_file_for_line(FILE *file, const char *search)
 		tmp[tmplength] = '\0';
 		
 		if(g_strcmp0(tmp, search) == 0)
-			return TRUE;
+			return true;
 	}
-	return FALSE;
+	return false;
 }
 
-static gint run_pacstrap(Data *d)
+static int run_pacstrap(Data *d)
 {
+	char *cachedir = g_build_path("/", d->mountPath, "var", "cache", "pacman", "pkg", NULL);
+	
 	// Install base first before user packages. That way we can modify
 	// pacman.conf's repository list and download signing keys.
 	if(!d->skipPacstrap)
 	{
-		gint status = RUN(d, NULL, NULL, "pacstrap", d->mountPath, "base");
+		int status = RUN(NULL,
+			"pacman",
+			"-r", d->mountPath,
+			"--cachedir", cachedir,
+			"--noconfirm",
+			"-Sy", "base");
 		if(status > 0)
+		{
+			g_free(cachedir);
 			return status;
+		}
 		else if(status < 0)
-			EXIT(d, -status, , "pacstrap failed with code %i.", -status)
+			FAIL(-status, g_free(cachedir), "pacman failed with code %i.", -status)
 	}
+	step(d);
 
 	char *confpath = g_build_path("/", d->mountPath, "etc", "pacman.conf", NULL);
 	char *gpgdir = g_build_path("/", d->mountPath, "etc", "pacman.d", "gnupg", NULL);
-	char *cachedir = g_build_path("/", d->mountPath, "var", "cache", "pacman", "pkg", NULL);
-	
+
+	// pacman-key init
+	{
+		char *args[] = {"pacman-key",
+			"--config", confpath,
+			"--gpgdir", gpgdir,
+			"--init",
+			NULL};
+		
+		int status = run(NULL, (const char * const *)args);
+		if(status > 0)
+			return status;
+		else if(status < 0)
+			FAIL(-status, , "pacman-key --init failed with code %i.", -status)
+		
+		args[5] = "--populate";
+		
+		status = run(NULL, (const char * const *)args);
+		if(status > 0)
+			return status;
+		else if(status < 0)
+			FAIL(-status, , "pacman-key --populate failed with code %i.", -status)
+	}
+
 	if(d->repos)
 	{
-		printf("Adding repos to %s\n", confpath);
+		println("Adding repos to %s", confpath);
 		FILE *conf = fopen(confpath, "a+");
 		
 		for(GList *it=d->repos; it!=NULL; it=it->next)
@@ -804,7 +1003,7 @@ static gint run_pacstrap(Data *d)
 			
 			// Don't add the repo if it's already there
 			char *searchFor = g_strdup_printf("[%s]", repo->name);
-			gboolean found = search_file_for_line(conf, searchFor);
+			bool found = search_file_for_line(conf, searchFor);
 			g_free(searchFor);
 			
 			if(!found)
@@ -815,9 +1014,9 @@ static gint run_pacstrap(Data *d)
 					repo->server);
 			}
 			
-			println("Downloading signing keys for %s...", repo->name);
-			guint nkeys = g_strv_length(repo->keys);
-			g_message("n keys: %i", nkeys);
+			println("Downloading signing keys for %s from pgp.mit.edu...", repo->name);
+			
+			size_t nkeys = g_strv_length(repo->keys);
 			char **args = g_new(char *, nkeys+7);
 			args[0] = "pacman-key";
 			args[1] = "--keyserver";
@@ -825,22 +1024,45 @@ static gint run_pacstrap(Data *d)
 			args[3] = "--gpgdir";
 			args[4] = gpgdir;
 			args[5] = "--recv-keys";
-			for(guint i=0;i<nkeys;++i)
+			for(size_t i=0;i<nkeys;++i)
 				args[6+i] = repo->keys[i];
 			args[nkeys+6] = NULL;
-			for(guint x=0;x<nkeys+6;++x)
-				g_message("%s", args[x]);
-			gint status = run(d, NULL, NULL, (const gchar * const *)args);
-			g_free(args);
-			
+			int status = run(NULL, (const char * const *)args);
+
 			if(status > 0)
+			{
+				g_free(args);
+				g_free(confpath);
+				g_free(gpgdir);
+				g_free(cachedir);
 				return status;
-			else if(status < 0)
-				EXIT(d, -status, , "pacman-key failed with code %i.", -status)
+			}
+
+			if(status < 0)
+			{
+				println("pacman-key --recv-keys on pgp.mit.edu failed with code %i", -status);
+				println("Trying pool.sks-keyservers.net");
+				args[2] = "pool.sks-keyservers.net";
+				status = run(NULL, (const char * const *)args);
+				if(status)
+				{
+					g_free(args);
+					g_free(confpath);
+					g_free(gpgdir);
+					g_free(cachedir);
+				}
+				
+				if(status > 0)
+					return status;
+				else if(status < 0)
+					FAIL(-status, , "pacman-key --recv-keys failed with code %i.", -status)
+			}
 		}
 		
 		fclose(conf);
 	}
+	
+	step(d);
 	
 	if(d->skipPacstrap)
 	{
@@ -850,15 +1072,15 @@ static gint run_pacstrap(Data *d)
 		step(d);
 		return run_genfstab(d);
 	}
-	
+
 	ensure_argument(d, &d->packages, "packages");
 	char ** split = g_strsplit(d->packages, " ", -1);
-	guint numPackages = 0;
-	for(guint i=0;split[i]!=NULL;++i)
+	size_t numPackages = 0;
+	for(size_t i=0;split[i]!=NULL;++i)
 		if(split[i][0] != '\0') // two spaces between packages create empty splits
 			numPackages++;
 	
-	char **args = g_new(gchar *, numPackages + 12);
+	char **args = g_new(char *, numPackages + 12);
 	args[0] = "pacman";
 	args[1] = "--noconfirm";
 	args[2] = "--root";
@@ -870,18 +1092,18 @@ static gint run_pacstrap(Data *d)
 	args[8] = "--gpgdir";
 	args[9] = gpgdir;
 	args[10] = "-Syu";
-	for(guint i=0,j=11;split[i]!=NULL;++i)
+	for(size_t i=0,j=11;split[i]!=NULL;++i)
 	{
 		if(split[i][0] != '\0')
 		{
 			if(g_strcmp0(split[i], "sudo") == 0)
-				d->enableSudoWheel = TRUE;
+				d->enableSudoWheel = true;
 			args[j++] = split[i];
 		}
 	}
 	args[numPackages+11] = '\0';
 		
-	gint status = run(d, NULL, NULL, (const gchar * const *)args);
+	int status = run(NULL, (const char * const *)args);
 	g_free(args);
 	g_strfreev(split);
 	g_free(confpath);
@@ -891,37 +1113,29 @@ static gint run_pacstrap(Data *d)
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, -status, , "pacman failed with code %i.", -status)
+		FAIL(-status, , "pacman failed with code %i.", -status)
 	
 	step(d);
 	return run_genfstab(d);
 }
 
-static gint run_genfstab(Data *d)
+static int run_genfstab(Data *d)
 {
-	gchar *etcpath = g_build_path("/", d->mountPath, "etc", NULL);
-	errno = 0;
-	if(mkdir(etcpath, 0755))
-		if(errno != EEXIST)
-			EXIT(d, errno, g_free(etcpath), "Failed to create /etc");
-	
-	gchar *fstabpath = g_strconcat(etcpath, "/fstab", NULL);
-	g_free(etcpath);
-	
+	char *fstabpath = g_build_path("/", d->mountPath, "etc/fstab", NULL);
 	println("Writing generated fstab to %s", fstabpath);
 	FILE *fstab = fopen(fstabpath, "w");
 	g_free(fstabpath);
 	
 	if(!fstab)
-		EXIT(d, 1, , "Failed to open fstab for writing")
+		FAIL(1, , "Failed to open fstab for writing")
 
 	// Genfstab doesn't always write what we want (for example,
 	// writing nosuid under options when installing to a flash drive)
 	// so write it outselves.
 
-	const gchar *fstype = d->writeExt4 ? "ext4" : d->ofstype;
+	const char *fstype = d->writeExt4 ? "ext4" : d->ofstype;
 	if(!fstype) // Should never happen, since the drive has already been mounted
-		EXIT(d, 1, fclose(fstab), "Unknown filesystem type")
+		FAIL(1, fclose(fstab), "Unknown filesystem type")
 
 	fprintf(fstab, "# <file system>\t<mount point>\t<fs type>\t<options>\t<dump>\t<pass>\n\n");
 	fprintf(fstab, "PARTUUID=%s\t/\t%s\trw,relatime,data=ordered\t0\t1\n",
@@ -934,75 +1148,113 @@ static gint run_genfstab(Data *d)
 	return run_chroot(d);
 }
 
-static gint run_chroot(Data *d)
+static int run_chroot(Data *d)
 {
 	println("Changing root to %s", d->mountPath);
 	if(!exitable_chroot(d->mountPath))
-		EXIT(d, 1, , "Chroot failed (must run as root).", 1)
-	
-	// A number of processes use devfs (such as piping to/from
-	// /dev/null, and hwclock which uses /dev/rtc)
-	if(mount("udev", "/dev", "devtmpfs", MS_NOSUID, "mode=0755"))
-	{
-		// Don't error if it's already mounted
-		if(errno != EBUSY)
-			EXIT(d, errno, , "Failed to mount /dev devtmps with error %i.", errno)
-	}
+		FAIL(1, , "Chroot failed (must run as root).", 1)
 	
 	step(d);
-	gint r = set_passwd(d);
-	printf("Leaving chroot\n");
-	umount("/dev");
+	int r = set_passwd(d);
+	println("Leaving chroot");
 	exitable_chroot(NULL);
 	return r;
 }
 
-static gint chpasswd(Data *d, const gchar *user, const gchar *password)
+static int chpasswd(Data *d, const char *user, const char *password)
 {
 	println("Running chpasswd on %s", user);
-	GError *error = NULL;
-	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE, &error, "chpasswd", NULL);
-	if(error)
-		EXIT(d, 1, g_error_free(error), "%s", error->message)
 	
-	GOutputStream *stdin = g_subprocess_get_stdin_pipe(proc);
+	int fd[2];
+	if(pipe(fd) || NONBLOCK(fd[0]) || NONBLOCK(fd[1]))
+		FAIL(errno, , "Failed to open pipe")
+	
+	pid_t ppid = getpid();
+	pid_t pid = fork();
+	
+	if(pid == -1)
+	{
+		FAIL(errno, , "Failed to fork new process")
+	}
+	else if(pid == 0)
+	{
+		close(fd[1]);
+		dup2(fd[0], STDIN_FILENO);
+		
+		// See run()
+		if(prctl(PR_SET_PDEATHSIG, SIGHUP))
+			abort();
+		if(getppid() != ppid)
+			abort();
+		
+		char * const args[] = {"chpasswd", NULL};
+		execvp("chpasswd", args);
+		abort();
+	}
 
 	int userlen = strlen(user);
 	int pwdlen = strlen(password);
 	
-	if(g_output_stream_write(stdin, user, userlen, d->cancellable, &error) != userlen 
-	|| g_output_stream_write(stdin, ":", 1, d->cancellable, &error) != 1
-	|| g_output_stream_write(stdin, password, pwdlen, d->cancellable, &error) != pwdlen
-	|| !g_output_stream_close(stdin, d->cancellable, &error))
+	if(write(fd[1], user, userlen) != userlen 
+	|| write(fd[1], ":", 1) != 1
+	|| write(fd[1], password, pwdlen) != pwdlen
+	|| close(fd[1]))
 	{
-		EXIT(d, 1, g_object_unref(proc);g_clear_error(&error), "%s", (error ? error->message : "Failed to write to chpasswd"))
+		FAIL(errno, , "Failed to write to chpasswd")
+	}
+
+	// See run()
+	int exitstatus = 0;
+	while(1)
+	{
+		fd_set rfds;
+		FD_ZERO(&rfds);
+		FD_SET(d->selfpipe[0], &rfds);
+		errno = 0;
+		select(d->selfpipe[0]+1, &rfds, NULL, NULL, NULL);
+		if(errno != 0 && errno != EINTR)
+			d->killing = true;
+		static char dummy[PIPE_BUF];
+		while(read(d->selfpipe[0], dummy, sizeof(dummy)) > 0);
+		
+		if(!d->killing)
+		{
+			errno = 0;
+			if(waitpid(pid, &exitstatus, WNOHANG) > 0)
+				break;
+			else if(errno == 0 || errno == EINTR) // 0 for WNOHANG
+				continue;
+		}
+		
+		// Something went wrong; stop the child process.
+		kill(pid, SIGKILL);
+		waitpid(pid, NULL, 0);
+		
+		if(d->killing)
+			FAIL(1, , "Install aborted")
+		else
+			FAIL(errno, , "Error monitoring process")
 	}
 	
-	if(!g_subprocess_wait(proc, d->cancellable, &error) || error)
-	{
-		if(error)
-			EXIT(d, 1, g_object_unref(proc);g_error_free(error), "%s", error->message)
-		EXIT(d, 1, , "Process cancelled")
-	}
-	
-	int exit = g_subprocess_get_exit_status(proc);
-	g_object_unref(proc);
+	int exit = 1;
+	if(WIFEXITED(exitstatus))
+		exit = WEXITSTATUS(exitstatus);
 	if(exit != 0)
-		EXIT(d, exit, , "chpasswd failed with code %i.", exit)
+		FAIL(exit, , "chpasswd failed with code %i.", exit)
 	return 0;
 }
 
-static gint set_passwd(Data *d)
+static int set_passwd(Data *d)
 {
 	ensure_argument(d, &d->password, "password");
 	if(d->password[0] == '\0')
 	{
-		printf("Skipping set password\n");
+		println("Skipping set password");
 		step(d);
 		return set_locale(d);
 	}
 	
-	gint status = 0;
+	int status = 0;
 	if((status = chpasswd(d, "root", d->password)))
 		return status;
 	
@@ -1010,18 +1262,18 @@ static gint set_passwd(Data *d)
 	return set_locale(d);
 }
 
-static gint set_locale(Data *d)
+static int set_locale(Data *d)
 {
 	ensure_argument(d, &d->locale, "locale");
 	
-	const gchar *locale = d->locale;
+	const char *locale = d->locale;
 	if(locale[0] == '\0')
 		locale = "en_US.UTF-8";
-	gchar *localeesc = g_regex_escape_string(locale, -1);
-	
+	char *localeesc = g_regex_escape_string(locale, -1);
+
 	// Remove comments from any lines matching the given locale prefix
-	gchar *pattern = g_strdup_printf("s/^#(%s.*$)/\\1/", localeesc);
-	gint status = RUN(d, NULL, NULL, "sed", "-i", "-E", pattern, "/etc/locale.gen");
+	char *pattern = g_strdup_printf("s/^#(%s.*$)/\\1/", localeesc);
+	int status = RUN(NULL, "sed", "-i", "-E", pattern, "/etc/locale.gen");
 	g_free(pattern);
 	if(status > 0)
 	{
@@ -1029,38 +1281,37 @@ static gint set_locale(Data *d)
 		return status;
 	}
 	else if(status < 0)
-		EXIT(d, -status, g_free(localeesc), "Edit of /etc/locale.gen failed with code %i.", -status)
+		FAIL(-status, g_free(localeesc), "Edit of /etc/locale.gen failed with code %i.", -status)
 	
 	// Write first locale match to /etc/locale.conf (for the LANG variable)
 	
-	GInputStream *sout = NULL;
-	GSubprocess *proc = NULL;
 	pattern = g_strdup_printf("^%s", localeesc);
 	g_free(localeesc);
-	status = RUN(d, &proc, &sout, "grep", "-m1", "-e", pattern, "/etc/locale.gen");
+	int fd;
+	status = RUN(&fd, "grep", "-m1", "-e", pattern, "/etc/locale.gen");
 	g_free(pattern);
 	if(status > 0)
 		return status;
 	else if(status < -1) // exit code of 1 means no lines found, not error
-		EXIT(d, -status, g_object_unref(proc), "grep failed with code %i.", -status)
+		FAIL(-status, , "grep failed with code %i.", -status)
 	
-	gint lconff = open("/etc/locale.conf", O_WRONLY|O_CREAT);
+	int lconff = open("/etc/locale.conf", O_WRONLY|O_CREAT);
 	if(lconff < 0)
-		EXIT(d, errno, g_object_unref(proc), "Failed to open locale.conf for writing")
+		FAIL(errno, , "Failed to open locale.conf for writing")
 	
 	write(lconff, "LANG=", 5);
 	
 	char buf[1024];
-	gsize num = 0;
-	while((num = g_input_stream_read(sout, buf, 1024, NULL, NULL)) > 0)
+	size_t num = 0;
+	while((num = read(fd, buf, sizeof(buf))) > 0)
 	{
 		// Only write until the first space
-		const gchar *space = strchr(buf, ' ');
+		const char *space = strchr(buf, ' ');
 		if(space != NULL)
 			num = (space - buf);
 
 		if(write(lconff, buf, num) != num)
-			EXIT(d, 1, close(lconff);g_object_unref(proc), "Failed to write %i bytes to locale.conf", num)
+			FAIL(1, close(lconff);, "Failed to write %i bytes to locale.conf", num)
 		
 		if(space != NULL)
 			break;
@@ -1069,24 +1320,24 @@ static gint set_locale(Data *d)
 	close(lconff);
 
 	// Run locale-gen
-	status = RUN(d, NULL, NULL, "locale-gen");
+	status = RUN(NULL, "locale-gen");
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, -status, , "locale-gen failed with code %i.", -status)
+		FAIL(-status, , "locale-gen failed with code %i.", -status)
 	
 	step(d);
 	return set_zone(d);
 }
 
-static gint set_zone(Data *d)
+static int set_zone(Data *d)
 {
 	ensure_argument(d, &d->zone, "zone");
-	const gchar *zone = "UTC";
+	const char *zone = "UTC";
 	if(d->zone[0] != '\0')
 		zone = d->zone;
 	
-	gchar *path = g_build_path("/", "/usr/share/zoneinfo/", zone, NULL);
+	char *path = g_build_path("/", "/usr/share/zoneinfo/", zone, NULL);
 	println("Symlinking %s to /etc/localtime", path);
 
 	errno = 0;
@@ -1100,43 +1351,43 @@ static gint set_zone(Data *d)
 		if(errno == EEXIST)
 		{
 			errno = 0;
-			printf("/etc/localtime already exists, replacing\n");
+			println("/etc/localtime already exists, replacing");
 			if(!unlink("/etc/localtime"))
 				symlink(path, "/etc/localtime");
 		}
 	}
 	
 	if(errno)
-		EXIT(d, errno, g_free(path), "Error symlinking: %i", errno);
+		FAIL(errno, g_free(path), "Error symlinking: %i", errno);
 	
 	step(d);
 	g_free(path);
 	
 	// Set /etc/adjtime
-	gint status = RUN(d, NULL, NULL, "hwclock", "--systohc");
+	int status = RUN(NULL, "hwclock", "--systohc");
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, -status, , "Failed to set system clock with error %i.", -status)
+		FAIL(-status, , "Failed to set system clock with error %i.", -status)
 	
 	step(d);
 	return set_hostname(d);
 }
 
-static gint set_hostname(Data *d)
+static int set_hostname(Data *d)
 {
 	ensure_argument(d, &d->hostname, "hostname");
 	if(d->hostname[0] == '\0')
 	{
-		printf("Skipping setting hostname\n");
+		println("Skipping setting hostname");
 		step(d);
 		return create_user(d);
 	}
 	
 	println("Writing %s to hostname", d->hostname);
-	gint hostf = open("/etc/hostname", O_WRONLY|O_CREAT);
+	int hostf = open("/etc/hostname", O_WRONLY|O_CREAT);
 	if(hostf < 0)
-		EXIT(d, errno, , "Failed to open /etc/hostname for writing")
+		FAIL(errno, , "Failed to open /etc/hostname for writing")
 	int len = strlen(d->hostname);
 	write(hostf, d->hostname, len);
 	write(hostf, "\n", 1);
@@ -1146,31 +1397,31 @@ static gint set_hostname(Data *d)
 	return create_user(d);
 }
 
-static gint create_user(Data *d)
+static int create_user(Data *d)
 {
 	ensure_argument(d, &d->username, "username");
 	if(d->username[0] == '\0')
 	{
-		printf("Skipping create user\n");
+		println("Skipping create user");
 		d->steps++; // create_user has two steps
 		step(d);
 		return enable_services(d);
 	}
 	
-	gint status = RUN(d, NULL, NULL, "useradd", "-m", "-G", "wheel", d->username);
+	int status = RUN(NULL, "useradd", "-m", "-G", "wheel", d->username);
 	
 	if(status > 0)
 		return status;
 	// error code 9 is user already existed. As this installer should be
 	// repeatable (in order to easily fix problems and retry), ignore this error.
 	else if(status != -9 && status < 0)
-		EXIT(d, -status, , "Failed to create user, error code %i.", -status)
+		FAIL(-status, , "Failed to create user, error code %i.", -status)
 	
 	ensure_argument(d, &d->password, "password");
 	
 	if(d->password[0] == '\0')
 	{
-		printf("Skipping set password on user\n");
+		println("Skipping set password on user");
 	}
 	else
 	{
@@ -1183,16 +1434,16 @@ static gint create_user(Data *d)
 
 	if(d->name[0] == '\0')
 	{
-		printf("Skipping set real name on user\n");
+		println("Skipping set real name on user");
 	}
 	else
 	{
-		gint status = RUN(d, NULL, NULL, "chfn", "-f", d->name, d->username);
+		int status = RUN(NULL, "chfn", "-f", d->name, d->username);
 		
 		if(status > 0)
 			return status;
 		else if(status < 0)
-			EXIT(d, -status, , "Failed to create user, error code %i.", -status)
+			FAIL(-status, , "Failed to create user, error code %i.", -status)
 	}
 	
 	step(d);
@@ -1201,71 +1452,71 @@ static gint create_user(Data *d)
 	if(d->enableSudoWheel)
 	{
 		println("Enabling sudo for user %s", d->username);
-		gint status = RUN(d, NULL, NULL, "sed", "-i", "-E", "s/#\\s?(%wheel ALL=\\(ALL\\) ALL)/\\1/", "/etc/sudoers");
+		int status = RUN(NULL, "sed", "-i", "-E", "s/#\\s?(%wheel ALL=\\(ALL\\) ALL)/\\1/", "/etc/sudoers");
 		if(status > 0)
 			return status;
 		else if(status < 0)
-			EXIT(d, -status, , "Edit of /etc/sudoers failed with code %i.", -status)
+			FAIL(-status, , "Edit of /etc/sudoers failed with code %i.", -status)
 	}
 	
 	step(d);
 	return enable_services(d);
 }
 
-static gint enable_services(Data *d)
+static int enable_services(Data *d)
 {
 	ensure_argument(d, &d->services, "services");
 	if(d->services[0] == '\0')
 	{
-		printf("No services to enable\n");
+		println("No services to enable");
 		step(d);
 		return run_postcmd(d);
 	}
 	
-	gchar ** split = g_strsplit(d->services, " ", -1);
-	guint numServices = 0;
-	for(guint i=0;split[i]!=NULL;++i)
+	char ** split = g_strsplit(d->services, " ", -1);
+	size_t numServices = 0;
+	for(size_t i=0;split[i]!=NULL;++i)
 		if(split[i][0] != '\0') // two spaces between services create empty splits
 			numServices++;
 	
-	gchar **args = g_new(gchar *, numServices + 3);
+	char **args = g_new(char *, numServices + 3);
 	args[0] = "systemctl";
 	args[1] = "enable";
-	for(guint i=0,j=2;split[i]!=NULL;++i)
+	for(size_t i=0,j=2;split[i]!=NULL;++i)
 		if(split[i][0] != '\0')
 			args[j++] = split[i];
 	args[numServices+2] = '\0';
 		
-	gint status = run(d, NULL, NULL, (const gchar * const *)args);
+	int status = run(NULL, (const char * const *)args);
 	g_free(args);
 	g_strfreev(split);
 	
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		EXIT(d, -status, , "systemctl enable failed with code %i.", -status)
+		FAIL(-status, , "systemctl enable failed with code %i.", -status)
 	
 	step(d);
 	return run_postcmd(d);
 }
 
-static gint run_postcmd(Data *d)
+static int run_postcmd(Data *d)
 {
 	if(d->postcmds == NULL)
 	{
-		printf("No postcmds\n");
+		println("No postcmds");
 		step(d);
 		return 0;
 	}
 	
 	for(GList *it=d->postcmds; it!=NULL; it=it->next)
 	{
-		gint status = RUN(d, NULL, NULL, "/bin/sh", "-c", it->data);
+		int status = RUN(NULL, "/bin/sh", "-c", it->data);
 		
 		if(status > 0)
 			return status;
 		else if(status < 0)
-			EXIT(d, -status, , "Postcmd '%s' failed with code %i.", it->data, -status)
+			FAIL(-status, , "Postcmd '%s' failed with code %i.", it->data, -status)
 	}
 	
 	step(d);
