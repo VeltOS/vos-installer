@@ -58,6 +58,14 @@
  *                   PGP signing key(s) (full fingerprint only), if any,
  *                   that should be downloaded from a keyserver and added
  *                   to pacman's keyring.
+ *     --refind   Install the rEFInd boot manager. This is a UEFI-only
+ *                   boot manager. The install updates your UEFI NVRAM
+ *                   to make itself the default boot. rEFInd auto-detects
+ *                   Linux kernels, so no configuration should be needed.
+ *                   OPTIONALLY specify a block device partition to install
+ *                   to, which also installs at [efi]/EFI/boot/bootx64.efi
+ *                   (and does not update NVRAM) for more compatibility.
+ *                   Useful for installation on an external flash drive.
  *
  * All arguments an be passed over STDIN in the
  * form ^<argname>=<value>$ where ^ means start of line and $ means
@@ -133,6 +141,8 @@ typedef struct
 	bool writeExt4;
 	bool debug;
 	char *newFSLabel; // Only if writeExt4
+	bool refind;
+	char *refindDest;
 	GList *postcmds;
 	GList *repos;
 	
@@ -172,6 +182,7 @@ static int set_hostname(Data *d);
 static int create_user(Data *d);
 static int enable_services(Data *d);
 static int run_postcmd(Data *d);
+static int install_refind(Data *d);
 
 #define println(fmt...) { printf(fmt); printf("\n"); }
 
@@ -205,7 +216,8 @@ static struct argp_option options[] =
 	{"kill",      997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately."},
 	{"postcmd",   996, "postcmd",     0, "Optionally specify a shell command to run after installation. This may be specified multiple times."},
 	{"repo",      995, "repo",      0, "Specify a pacman repository to add to /etc/pacman.conf on the target machine, in the format \"Name,Server,SigLevel,Keys...\" where keys are full PGP fingerprints to download public keys to add to pacman's keyring."},
-	{"debug",      994, 0,      0, "specify to enable debug mode"},
+	{"debug",     994, 0,      0, "specify to enable debug mode"},
+	{"refind",    993, "block device",      OPTION_ARG_OPTIONAL, "Install rEFInd boot manager to the default EFI partition. Optionally specify a partition to perform a more compatible install (good for external devices)."},
 	{0}
 };
 
@@ -213,7 +225,7 @@ const char *argp_program_version = "vos-install-cli 0.1";
 const char *argp_program_bug_address = "Aidan Shafran <zelbrium@gmail.com>";
 static char argp_program_doc[] = "An installer for VeltOS (Arch Linux). See top of main.c for detailed instructions on how to use the installer. The program author is not responsible for any damages, including but not limited to exploded computer, caused by this program. Use as root and with caution.";
 
-static const size_t kMaxSteps = 16;
+static const size_t kMaxSteps = 17;
 static Data *d;
 
 
@@ -352,6 +364,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	}
 	case 994: d->debug = TRUE; break;
+	case 993: d->refind = true; d->refindDest = arg; break;
 	default: g_free(arg); return ARGP_ERR_UNKNOWN;
 	}
 	return 0;
@@ -554,6 +567,7 @@ static int run_full(int *out, bool mute, const char * const *args)
 			abort();
 		
 		execvp(args[0], (char * const *)args);
+		println("Error: Failed to launch process. It might not exist.");
 		abort();
 	}
 
@@ -949,12 +963,26 @@ static int run_pacstrap(Data *d)
 	// pacman.conf's repository list and download signing keys.
 	if(!d->skipPacstrap)
 	{
-		int status = RUN(NULL,
-			"pacman",
-			"-r", d->mountPath,
-			"--cachedir", cachedir,
-			"--noconfirm",
-			"-Sy", "base");
+		int status;
+		if(d->refind)
+		{
+			status = RUN(NULL,
+				"pacman",
+				"-r", d->mountPath,
+				"--cachedir", cachedir,
+				"--noconfirm",
+				"-Sy", "base", "refind-efi");
+		}
+		else
+		{
+			status = RUN(NULL,
+				"pacman",
+				"-r", d->mountPath,
+				"--cachedir", cachedir,
+				"--noconfirm",
+				"-Sy", "base");
+		}
+		
 		if(status > 0)
 		{
 			g_free(cachedir);
@@ -1506,7 +1534,7 @@ static int run_postcmd(Data *d)
 	{
 		println("No postcmds");
 		step(d);
-		return 0;
+		return install_refind(d);
 	}
 	
 	for(GList *it=d->postcmds; it!=NULL; it=it->next)
@@ -1518,6 +1546,37 @@ static int run_postcmd(Data *d)
 		else if(status < 0)
 			FAIL(-status, , "Postcmd '%s' failed with code %i.", it->data, -status)
 	}
+	
+	step(d);
+	return install_refind(d);
+}
+
+static int install_refind(Data *d)
+{
+	if(!d->refind)
+	{
+		println("Not installing rEFInd bootmanager");
+		step(d);
+		return 0;
+	}
+
+	int status;
+	
+	// the run_pacstrap section will automatically install
+	// the 'refind-efi' package if d->refind
+	if(d->refindDest)
+	{
+		status = RUN(NULL, "refind-install", "--yes", "--usedefault", d->refindDest);
+	}
+	else
+	{
+		status = RUN(NULL, "refind-install", "--yes");
+	}
+	
+	if(status > 0)
+		return status;
+	else if(status < 0)
+		FAIL(-status, , "refind-install --usedefault failed with code %i.", -status)
 	
 	step(d);
 	return 0;
