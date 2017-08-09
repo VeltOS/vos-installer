@@ -49,7 +49,7 @@ static void page_drive_select_init(PageDriveSelect *self)
 	clutter_actor_set_layout_manager(CLUTTER_ACTOR(self->driveListBox), CLUTTER_LAYOUT_MANAGER(listLayout));
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->driveListBox));
 
-	self->helpLabel = cmk_label_new_full("Please select a drive to install VeltOS on. All contents of the selected drive will be erased!", TRUE);
+	self->helpLabel = cmk_label_new_full("Please select a parition to install VeltOS.\nYou must use a utility such as cgdisk to create partitions.", TRUE);
 	cmk_label_set_line_alignment(self->helpLabel, PANGO_ALIGN_CENTER);
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->helpLabel));
 	
