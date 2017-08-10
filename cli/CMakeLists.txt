@@ -23,3 +23,5 @@ target_link_libraries(vos-install-cli
 	${GIO_LIBRARIES}
 	${LIBUDEV_LIBRARIES}
 )
+
+install(TARGETS vos-install-cli DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)

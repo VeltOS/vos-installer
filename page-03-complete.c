@@ -195,7 +195,7 @@ void spawn_installer_process(const gchar *drive, const gchar *boot, const gchar 
 
 	const gchar *args[] = {
 		"pkexec",
-		"/home/aidan/projects/vos-installer/build/cli/vos-install-cli",
+		"vos-install-cli",
 		"--ext4=VeltOS",
 		"--kill=/tmp/vos-installer-killfifo",
 		"--postcmd",

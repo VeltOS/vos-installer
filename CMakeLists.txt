@@ -4,7 +4,10 @@
 
 cmake_minimum_required(VERSION 3.4)
 project(vos-installer)
-set(CMAKE_BUILD_TYPE Debug)
+
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+  set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "default install path" FORCE)
+endif()
 
 add_executable(vos-install-gui
 	main.c
@@ -41,3 +44,5 @@ target_link_libraries(vos-install-gui
 )
 
 add_subdirectory(cli)
+
+install(TARGETS vos-install-gui DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
