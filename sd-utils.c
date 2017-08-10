@@ -79,15 +79,24 @@ static void add_drive_device(MonitorThreadData *monitor, GArray *drives, struct 
 		if(removable)
 			sd.removable = strtol(removable, NULL, 10) ? 1 : 0;
 	}
+
+	sd.parent = g_strdup(udev_device_get_devnode(parent));
 	
-	// Check for EFI by looking at the filesystem label, which should always
-	// be 'EFI', and also making sure that the drive is using GPT (required
-	// for EFI).
-	const char *fsLabel = udev_device_get_property_value(dev, "ID_FS_LABEL");
+	// Check for EFI System Partition
+	char *partType = g_ascii_strdown(udev_device_get_property_value(dev, "ID_PART_ENTRY_TYPE"), -1);
 	const char *partTableType = udev_device_get_property_value(dev, "ID_PART_TABLE_TYPE");
+	
 	sd.efi = 0;
-	if(fsLabel && partTableType)
-		sd.efi = (strncmp(fsLabel, "EFI", 3) == 0 && strncmp(partTableType, "gpt", 3) == 0);
+	if(partType && partTableType)
+	{
+		// c12a73... is the standard partition type GUID for EFI System Partitions
+		static const char *espGUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+		
+		sd.efi = (strncmp(partType, espGUID, sizeof(espGUID)-1) == 0
+		       && strncmp(partTableType, "gpt", 3) == 0);
+	}
+	
+	g_free(partType);
 
 	g_array_append_val(drives, sd);
 	monitor->addcb(&g_array_index(drives, StorageDevice, drives->len-1), monitor->userdata);
@@ -136,6 +145,7 @@ static void free_storage_device_contents(StorageDevice *device)
 {
 	g_return_if_fail(device);
 	g_free(device->node);
+	g_free(device->parent);
 	g_free(device->name);
 	g_free(device->fs);
 }
@@ -209,6 +219,7 @@ StorageDevice * copy_storage_device(const StorageDevice *device)
 		return NULL;
 	StorageDevice *copy = g_new0(StorageDevice, 1);
 	copy->node = g_strdup(device->node);
+	copy->parent = g_strdup(device->parent);
 	copy->name = g_strdup(device->name);
 	copy->fs = g_strdup(device->fs);
 	copy->sizeBytes = device->sizeBytes;

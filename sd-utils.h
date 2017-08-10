@@ -13,6 +13,7 @@
  */
 typedef struct {
 	char *node; // '/dev/...'
+	char *parent; // Dev path to parent device (eg parent device of '/dev/sda3' is '/dev/sda')
 	char *name; // Human-readable name
 	char *fs; // Filesystem name (ex 'ext4' or 'ntfs')
 	long sizeBytes;
@@ -22,8 +23,7 @@ typedef struct {
 	void *userdata;
 } StorageDevice;
 
-// GArray of StorageDevices. Called on a separate thread from the caller
-// of monitor_storage_devices.
+// Called on a separate thread from the caller of monitor_storage_devices.
 typedef void (*StorageDeviceAddedCb)(StorageDevice *device, gpointer userdata);
 typedef void (*StorageDeviceRemovedCb)(StorageDevice *device, gpointer userdata);
 
