@@ -180,7 +180,8 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 }
 
 extern StorageDevice *gSelectedDevice;
-extern void spawn_installer_process(const gchar *drive, const gchar *name, const gchar *username, const gchar *hostname, const gchar *password);
+extern StorageDevice *gSelectedBoot;
+extern void spawn_installer_process(const gchar *drive, const gchar *boot, const gchar *name, const gchar *username, const gchar *hostname, const gchar *password);
 
 static void on_confirm_dialog_select(PageProfile *self, const gchar *selection)
 {
@@ -192,18 +193,24 @@ static void on_confirm_dialog_select(PageProfile *self, const gchar *selection)
 	{
 		cmk_widget_replace(CMK_WIDGET(self), NULL);
 		spawn_installer_process(gSelectedDevice->node,
+			gSelectedBoot ? gSelectedBoot->node : NULL,
 			cmk_textfield_get_text(self->name),
 			cmk_textfield_get_text(self->username),
 			cmk_textfield_get_text(self->hostname),
 			cmk_textfield_get_text(self->password));
 	}
+	g_free(b);
 }
 
 static void on_next_button_activate(PageProfile *self)
 {
 	if(validate_input(self, NULL))
 	{
-		gchar *l = g_strdup_printf("You are about to install VeltOS to\n\n  \"%s\" (%s)\n\nThis will PERMANENTLY DESTROY ALL DATA on the drive. Are you sure you want to continue?\n", gSelectedDevice->name, gSelectedDevice->node);
+		gchar *l = g_strdup_printf("You are about to install VeltOS to\n\n  \"%s\" (%s)%s%s\n\nThis will PERMANENTLY DESTROY ALL DATA on the drive. Are you sure you want to continue?\n",
+			gSelectedDevice->name,
+			gSelectedDevice->node,
+			gSelectedBoot ? "\n  with rEFInd at " : "",
+			gSelectedBoot ? gSelectedBoot->node : "");
 		gchar *b = g_strdup_printf("Install to %s", gSelectedDevice->node);
 		CmkDialog *d = cmk_dialog_new_simple(l, NULL, "STOP!", b, NULL);
 		g_signal_connect_swapped(d, "select", G_CALLBACK(on_confirm_dialog_select), self);

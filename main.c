@@ -60,12 +60,19 @@ int main(int argc, char **argv)
 	cmk_widget_bind_fill(home);
 	g_signal_connect(home, "replace", G_CALLBACK(next_page), NULL);
 	cmk_focus_stack_push(CMK_WIDGET(home));
-	
+
 	CmkWidget *ds = page_drive_select_new();
 	clutter_actor_hide(CLUTTER_ACTOR(ds));
 	cmk_widget_add_child(window, ds);
 	cmk_widget_bind_fill(ds);
 	g_signal_connect(ds, "replace", G_CALLBACK(next_page), NULL);
+
+	CmkWidget *boot = page_boot_select_new();
+	clutter_actor_hide(CLUTTER_ACTOR(boot));
+	cmk_widget_add_child(window, boot);
+	cmk_widget_bind_fill(boot);
+	g_signal_connect(boot, "replace", G_CALLBACK(next_page), NULL);
+	g_signal_connect(boot, "back", G_CALLBACK(prev_page), NULL);
 
 	CmkWidget *profile = page_profile_new();
 	clutter_actor_hide(CLUTTER_ACTOR(profile));

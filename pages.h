@@ -17,6 +17,9 @@ CmkWidget * page_home_new();
 G_DECLARE_FINAL_TYPE(PageDriveSelect, page_drive_select, PAGE, DRIVE_SELECT, CmkWidget);
 CmkWidget * page_drive_select_new();
 
+G_DECLARE_FINAL_TYPE(PageBootSelect, page_boot_select, PAGE, BOOT_SELECT, CmkWidget);
+CmkWidget * page_boot_select_new();
+
 G_DECLARE_FINAL_TYPE(PageProfile, page_profile, PAGE, PROFILE, CmkWidget);
 CmkWidget * page_profile_new();
 

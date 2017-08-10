@@ -180,16 +180,16 @@ static void on_proc_complete(GSubprocess *proc, GAsyncResult *res, gpointer x)
 	}
 }
 
-void spawn_installer_process(const gchar *drive, const gchar *name, const gchar *username, const gchar *hostname, const gchar *password)
+void spawn_installer_process(const gchar *drive, const gchar *boot, const gchar *name, const gchar *username, const gchar *hostname, const gchar *password)
 {
-	//g_message("spawn %s, %s, %s, %s, %s", drive, name, username, hostname, password);
+	g_message("spawn cli: drive: %s, boot: %s, host: %s, user: %s, name: %s",
+		drive, boot, hostname, username, name);
 
 	// TODO: Maybe randomly generate a name, so that multiple installers
 	// can run simulataneously without their aborts stopping both?
 	mkfifo("/tmp/vos-installer-killfifo", 0600);
 
-	GError *error = NULL;
-	GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error,
+	const gchar *args[] = {
 		"pkexec",
 		"/home/aidan/projects/vos-installer/build/cli/vos-install-cli",
 		"--ext4=VeltOS",
@@ -197,8 +197,22 @@ void spawn_installer_process(const gchar *drive, const gchar *name, const gchar 
 		"--postcmd",
 		"sed -i 's/^#background=.*$/background=\\/usr\\/share\\/veltos\\/wallpapers\\/default.png/; s/^#theme-name=.*$/theme-name=Paper/; s/^#icon-theme-name=.*$/icon-theme-name=Paper/; s/^#font-name=.*$/font-name=Noto Sans 11/; s/^#position=.*$/position=30%,center 50%,center/' /etc/lightdm/lightdm-gtk-greeter.conf",
 		"--repo",
-		"vosrepo,http://repo.velt.io/$arch,Required TrustAll,1BCE8B257234A9DA2A733339C876A8F2E3BB5484", // Aidan Shafran's signing key
-		NULL);
+		"vosrepo,http://repo.velt.io/$arch,Required TrustAll,1BCE8B257234A9DA2A733339C876A8F2E3BB5484",
+		"--refind",
+		boot,
+		NULL,
+	};
+
+	if(!boot)
+		args[8] = NULL; // remove "--refind"
+	
+	printf("params:");
+	for(gint i=0;args[i]!=NULL;++i)
+		printf(" \"%s\"", args[i]);
+	printf("\n");
+	
+	GError *error = NULL;
+	GSubprocess *proc = g_subprocess_newv(args, G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error);
 
 	gInstallerProc = proc;
 	g_message("proc: %p %p %s", proc, error, error ? error->message : "");
