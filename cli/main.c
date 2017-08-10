@@ -62,10 +62,11 @@
  *                   boot manager. The install updates your UEFI NVRAM
  *                   to make itself the default boot. rEFInd auto-detects
  *                   Linux kernels, so no configuration should be needed.
- *                   OPTIONALLY specify a block device partition to install
- *                   to, which also installs at [efi]/EFI/boot/bootx64.efi
- *                   (and does not update NVRAM) for more compatibility.
- *                   Useful for installation on an external flash drive.
+ *                   If no device is specified, rEFInd installs to its
+ *                   automatic location. Otherwise, the installer will
+ *                   determine if the drive is internal or external and
+ *                   choose to use refind-install's --root or --usedefault
+ *                   flags, respectively.
  *
  * All arguments an be passed over STDIN in the
  * form ^<argname>=<value>$ where ^ means start of line and $ means
@@ -153,6 +154,7 @@ typedef struct
 	char *killfifo;
 	char *partuuid;
 	char *ofstype; // original fs type before running mkfs.ext4, or NULL if none
+	bool refindExternal; // Set true if refind is being installed on an external device
 	
 	int selfpipe[2];
 	bool killing;
@@ -751,20 +753,50 @@ static int start(Data *d)
 	udev_enumerate_scan_devices(enumerate);
 
 	struct udev_device *dev = NULL;
+	struct udev_device *installdev = NULL;
+	struct udev_device *refinddev = NULL;
 	struct udev_list_entry *devListEntry;
 	struct udev_list_entry *devices = udev_enumerate_get_list_entry(enumerate);
 	udev_list_entry_foreach(devListEntry, devices)
 	{
 		const char *path = udev_list_entry_get_name(devListEntry);
 		dev = udev_device_new_from_syspath(udev, path);
-		if(g_strcmp0(udev_device_get_devnode(dev), d->dest) == 0)
-			break;
+		if(!installdev && g_strcmp0(udev_device_get_devnode(dev), d->dest) == 0)
+		{
+			installdev = dev;
+			udev_device_ref(dev);
+		}
+		if(d->refind
+		&& !refinddev
+		&& g_strcmp0(udev_device_get_devnode(dev), d->refindDest) == 0)
+		{
+			refinddev = dev;
+			udev_device_ref(dev);
+		}
 		udev_device_unref(dev);
 		dev = NULL;
+		if(d->refind && installdev && refinddev)
+			break;
+		else if(!d->refind && installdev && refinddev)
+			break;
 	}
 	
-	if(!dev)
-		FAIL(1, udev_unref(udev), "Destination device not found.", 1)
+	if(!installdev)
+		FAIL(1, udev_unref(udev), "Install destination device not found.", 1)
+	if(!refinddev)
+		FAIL(1, udev_unref(udev), "rEFInd destination device not found.", 1)
+	
+	if(g_strcmp0(udev_device_get_property_value(refinddev, "ID_FS_TYPE"), "vfat") != 0)
+		FAIL(1, udev_unref(udev), "Given rEFInd destination device is not formatted as vfat.", 1)
+
+	struct udev_device *rfparent = udev_device_get_parent(refinddev);
+	if(!rfparent)
+		FAIL(1, udev_unref(udev), "rEFInd destination device (parent) not found.", 1)
+	
+	const char *removable = udev_device_get_sysattr_value(rfparent, "removable");
+	d->refindExternal = false;
+	if(removable)
+		d->refindExternal = strtol(removable, NULL, 10) ? 1 : 0;
 	
 	d->partuuid = g_strdup(udev_device_get_property_value(dev, "ID_PART_ENTRY_UUID"));
 	if(!d->partuuid)
@@ -867,6 +899,9 @@ static int mount_volume(Data *d)
 	println("Creating directories");
 	
 	#define TRY_MKDIR(path, mode) { if(mkdir(path, mode) && errno != EEXIST) FAIL(errno,, "Failed to mkdir %s/" path, d->mountPath) }
+	TRY_MKDIR("boot", 0755)
+	if(d->refind)
+		TRY_MKDIR("boot/efi", 0755)
 	TRY_MKDIR("etc", 0755)
 	TRY_MKDIR("run", 0755)
 	TRY_MKDIR("dev", 0755)
@@ -1564,19 +1599,42 @@ static int install_refind(Data *d)
 	
 	// the run_pacstrap section will automatically install
 	// the 'refind-efi' package if d->refind
-	if(d->refindDest)
+	if(d->refindDest && d->refindExternal)
 	{
+		println("Installing rEFInd external EFI standard location");
 		status = RUN(NULL, "refind-install", "--yes", "--usedefault", d->refindDest);
+	}
+	else if(d->refindDest && !d->refindExternal)
+	{
+		println("Installing rEFInd to internal EFI location");
+		
+		// To force refind-install to  install at a specific drive and
+		// still set efivars and such is to mount the drive at
+		// /boot/efi before running, AND make sure it's a vfat partition.
+		// If those aren't true, refind-install will try to auto-detect
+		// an install location, which is not what the user asked for.
+		// This should be good enough
+		
+		// boot/efi created earlier
+		// also in chroot still, so use absolute path
+		if(mount(d->refindDest, "/boot/efi", "vfat", MS_SYNCHRONOUS, "") && errno != EBUSY)
+			FAIL(errno, , "Failed to mount EFI partition")
+		
+		status = RUN(NULL, "refind-install", "--yes");
+		
+		umount("/boot/efi");
 	}
 	else
 	{
+		println("Installing rEFInd automatically");
+		
 		status = RUN(NULL, "refind-install", "--yes");
 	}
 	
 	if(status > 0)
 		return status;
 	else if(status < 0)
-		FAIL(-status, , "refind-install --usedefault failed with code %i.", -status)
+		FAIL(-status, , "refind-install failed with code %i.", -status)
 	
 	step(d);
 	return 0;
