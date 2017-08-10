@@ -27,7 +27,7 @@ add_executable(vos-install-gui
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUDEV REQUIRED libudev)
-pkg_check_modules(CMK REQUIRED libcmk>=0.4)
+pkg_check_modules(CMK REQUIRED libcmk>=0.5)
 
 target_include_directories(vos-install-gui PRIVATE
 	${CMK_INCLUDE_DIRS}
