@@ -798,10 +798,10 @@ static int start(Data *d)
 	if(removable)
 		d->refindExternal = strtol(removable, NULL, 10) ? 1 : 0;
 	
-	d->partuuid = g_strdup(udev_device_get_property_value(dev, "ID_PART_ENTRY_UUID"));
+	d->partuuid = g_strdup(udev_device_get_property_value(installdev, "ID_PART_ENTRY_UUID"));
 	if(!d->partuuid)
 		FAIL(1, udev_unref(udev), "PARTUUID not found.", 1)
-	d->ofstype = g_strdup(udev_device_get_property_value(dev, "ID_FS_TYPE"));
+	d->ofstype = g_strdup(udev_device_get_property_value(installdev, "ID_FS_TYPE"));
 	udev_unref(udev);
 	
 	return run_ext4(d);

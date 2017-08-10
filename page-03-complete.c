@@ -189,6 +189,10 @@ void spawn_installer_process(const gchar *drive, const gchar *boot, const gchar 
 	// can run simulataneously without their aborts stopping both?
 	mkfifo("/tmp/vos-installer-killfifo", 0600);
 
+	gchar *refindArg = NULL;
+	if(boot)
+		refindArg = g_strdup_printf("--refind=%s", boot);
+
 	const gchar *args[] = {
 		"pkexec",
 		"/home/aidan/projects/vos-installer/build/cli/vos-install-cli",
@@ -198,14 +202,10 @@ void spawn_installer_process(const gchar *drive, const gchar *boot, const gchar 
 		"sed -i 's/^#background=.*$/background=\\/usr\\/share\\/veltos\\/wallpapers\\/default.png/; s/^#theme-name=.*$/theme-name=Paper/; s/^#icon-theme-name=.*$/icon-theme-name=Paper/; s/^#font-name=.*$/font-name=Noto Sans 11/; s/^#position=.*$/position=30%,center 50%,center/' /etc/lightdm/lightdm-gtk-greeter.conf",
 		"--repo",
 		"vosrepo,http://repo.velt.io/$arch,Required TrustAll,1BCE8B257234A9DA2A733339C876A8F2E3BB5484",
-		"--refind",
-		boot,
+		refindArg,
 		NULL,
 	};
 
-	if(!boot)
-		args[8] = NULL; // remove "--refind"
-	
 	printf("params:");
 	for(gint i=0;args[i]!=NULL;++i)
 		printf(" \"%s\"", args[i]);
@@ -214,6 +214,8 @@ void spawn_installer_process(const gchar *drive, const gchar *boot, const gchar 
 	GError *error = NULL;
 	GSubprocess *proc = g_subprocess_newv(args, G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE, &error);
 
+	g_free(refindArg);
+	
 	gInstallerProc = proc;
 	g_message("proc: %p %p %s", proc, error, error ? error->message : "");
 
