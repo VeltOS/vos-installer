@@ -16,10 +16,9 @@ static const CmkNamedColor GrapheneColors[] = {
 	{"hover",      {255, 255, 255, 40}},
 	{"selected",   {255, 255, 255, 50}},
 	{"error",      {120, 0,   0,   220}},
-	NULL
+	{NULL}
 };
 
-static CmkWidget *window;
 extern GSubprocess *gInstallerProc;
 
 static void next_page(ClutterActor *current)

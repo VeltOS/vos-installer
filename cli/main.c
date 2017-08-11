@@ -166,7 +166,6 @@ static void * thread_watch_killfifo(void *data);
 static void * thread_watch_parent(void *data);
 static void on_signal(int sig, siginfo_t *siginfo, void *context);
 static void free_repo_struct(Repo *r);
-static int set_nonblock(int fd);
 static void step(Data *d);
 static int run(int *out, const char * const *args);
 static int run_shell(int *out, const char *command);
@@ -204,22 +203,22 @@ static int install_refind(Data *d);
 
 static struct argp_option options[] =
 {
-	{"dest",      'd', "block device", 0, "The volume to install Arch at"},
-	{"hostname",  'h', "name",      0, "Machine hostname"},
-	{"username",  'u', "name",      0, "Default account username"},
-	{"name",      'n', "name",      0, "Real name of default user"},
-	{"password",  'p', "password",  0, "Root/default account password"},
-	{"locale",    'l', "locale",    0, "Locale (locale.gen format)"},
-	{"zone",      'z', "file",      0, "Timezone file (relative to /usr/share/zoneinfo/)"},
-	{"packages",  'k', "packages",  0, "List of extra packages separated by spaces"},
-	{"services",  's', "services",  0, "List of systemd services to enable"},
-	{"ext4",      998, "new filesystem label",           OPTION_ARG_OPTIONAL, "Erases the destination volume and writes a new ext4 filesystem. Optionally specify a parameter which will become the new filesystem label."},
-	{"skippacstrap", 999, 0,        0, "Skips pacstrap, to avoid reinstalling all packages if they're already installed"},
-	{"kill",      997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately."},
-	{"postcmd",   996, "postcmd",     0, "Optionally specify a shell command to run after installation. This may be specified multiple times."},
-	{"repo",      995, "repo",      0, "Specify a pacman repository to add to /etc/pacman.conf on the target machine, in the format \"Name,Server,SigLevel,Keys...\" where keys are full PGP fingerprints to download public keys to add to pacman's keyring."},
-	{"debug",     994, 0,      0, "specify to enable debug mode"},
-	{"refind",    993, "block device",      OPTION_ARG_OPTIONAL, "Install rEFInd boot manager to the default EFI partition. Optionally specify a partition to perform a more compatible install (good for external devices)."},
+	{"dest",      'd', "block device", 0, "The volume to install Arch at", 0},
+	{"hostname",  'h', "name",      0, "Machine hostname", 0},
+	{"username",  'u', "name",      0, "Default account username", 0},
+	{"name",      'n', "name",      0, "Real name of default user", 0},
+	{"password",  'p', "password",  0, "Root/default account password", 0},
+	{"locale",    'l', "locale",    0, "Locale (locale.gen format)", 0},
+	{"zone",      'z', "file",      0, "Timezone file (relative to /usr/share/zoneinfo/)", 0},
+	{"packages",  'k', "packages",  0, "List of extra packages separated by spaces", 0},
+	{"services",  's', "services",  0, "List of systemd services to enable", 0},
+	{"ext4",      998, "new filesystem label",           OPTION_ARG_OPTIONAL, "Erases the destination volume and writes a new ext4 filesystem. Optionally specify a parameter which will become the new filesystem label.", 0},
+	{"skippacstrap", 999, 0,        0, "Skips pacstrap, to avoid reinstalling all packages if they're already installed", 0},
+	{"kill",      997, "kill",           0, "Optionally specify the path to a fifo. If any data is received at this fifo, the install will be aborted immediately.", 0},
+	{"postcmd",   996, "postcmd",     0, "Optionally specify a shell command to run after installation. This may be specified multiple times.", 0},
+	{"repo",      995, "repo",      0, "Specify a pacman repository to add to /etc/pacman.conf on the target machine, in the format \"Name,Server,SigLevel,Keys...\" where keys are full PGP fingerprints to download public keys to add to pacman's keyring.", 0},
+	{"debug",     994, 0,      0, "specify to enable debug mode", 0},
+	{"refind",    993, "block device",      OPTION_ARG_OPTIONAL, "Install rEFInd boot manager to the default EFI partition. Optionally specify a partition to perform a more compatible install (good for external devices).", 0},
 	{0}
 };
 
@@ -240,7 +239,7 @@ int main(int argc, char **argv)
 
 	// Parse arguments
 	d = g_new0(Data, 1);
-	static struct argp argp = {options, parse_arg, NULL, argp_program_doc};
+	static struct argp argp = {options, parse_arg, NULL, argp_program_doc, NULL, NULL, NULL};
 	error_t error;
 	if((error = argp_parse(&argp, argc, argv, 0, 0, d)))
 	{
@@ -440,7 +439,7 @@ static Repo * parse_repo_string(const char *arg)
 }
 
 // Wait for data to be sent to the killfifo
-static void * thread_watch_killfifo(void *data)
+static void * thread_watch_killfifo(UNUSED void *data)
 {
 	int fifo = open(d->killfifo, O_RDONLY);
 	char x[2];
@@ -457,7 +456,7 @@ static void * thread_watch_killfifo(void *data)
 
 // Constantly make sure the parent doesn't change (will
 // happen if the original parent dies). If it does, abort.
-static void * thread_watch_parent(void *data)
+static void * thread_watch_parent(UNUSED void *data)
 {
 	int ppid = getppid();
 	do
@@ -469,7 +468,7 @@ static void * thread_watch_parent(void *data)
 	return NULL;
 }
 
-static void on_signal(int sig, siginfo_t *siginfo, void *context)
+static void on_signal(int sig, UNUSED siginfo_t *siginfo, UNUSED void *context)
 {
 	if(sig != SIGCHLD)
 		d->killing = true;
@@ -745,7 +744,7 @@ static int start(Data *d)
 	
 	struct udev *udev = udev_new();
 	if(!udev)
-		FAIL(1, , "udev unavailable", 1)
+		FAIL(1, , "udev unavailable")
 	
 	// Apparently no way to get a udev_device by its devnode
 	struct udev_enumerate *enumerate = udev_enumerate_new(udev);
@@ -782,16 +781,16 @@ static int start(Data *d)
 	}
 	
 	if(!installdev)
-		FAIL(1, udev_unref(udev), "Install destination device not found.", 1)
+		FAIL(1, udev_unref(udev), "Install destination device not found.")
 	if(!refinddev)
-		FAIL(1, udev_unref(udev), "rEFInd destination device not found.", 1)
+		FAIL(1, udev_unref(udev), "rEFInd destination device not found.")
 	
 	if(g_strcmp0(udev_device_get_property_value(refinddev, "ID_FS_TYPE"), "vfat") != 0)
-		FAIL(1, udev_unref(udev), "Given rEFInd destination device is not formatted as vfat.", 1)
+		FAIL(1, udev_unref(udev), "Given rEFInd destination device is not formatted as vfat.")
 
 	struct udev_device *rfparent = udev_device_get_parent(refinddev);
 	if(!rfparent)
-		FAIL(1, udev_unref(udev), "rEFInd destination device (parent) not found.", 1)
+		FAIL(1, udev_unref(udev), "rEFInd destination device (parent) not found.")
 	
 	const char *removable = udev_device_get_sysattr_value(rfparent, "removable");
 	d->refindExternal = false;
@@ -800,7 +799,7 @@ static int start(Data *d)
 	
 	d->partuuid = g_strdup(udev_device_get_property_value(installdev, "ID_PART_ENTRY_UUID"));
 	if(!d->partuuid)
-		FAIL(1, udev_unref(udev), "PARTUUID not found.", 1)
+		FAIL(1, udev_unref(udev), "PARTUUID not found.")
 	d->ofstype = g_strdup(udev_device_get_property_value(installdev, "ID_FS_TYPE"));
 	udev_unref(udev);
 	
@@ -1215,7 +1214,7 @@ static int run_chroot(Data *d)
 {
 	println("Changing root to %s", d->mountPath);
 	if(!exitable_chroot(d->mountPath))
-		FAIL(1, , "Chroot failed (must run as root).", 1)
+		FAIL(1, , "Chroot failed (must run as root).")
 	
 	step(d);
 	int r = set_passwd(d);
@@ -1373,8 +1372,8 @@ static int set_locale(Data *d)
 		if(space != NULL)
 			num = (space - buf);
 
-		if(write(lconff, buf, num) != num)
-			FAIL(1, close(lconff);, "Failed to write %i bytes to locale.conf", num)
+		if(write(lconff, buf, num) != (int)num)
+			FAIL(1, close(lconff);, "Failed to write %lu bytes to locale.conf", num)
 		
 		if(space != NULL)
 			break;
@@ -1579,7 +1578,7 @@ static int run_postcmd(Data *d)
 		if(status > 0)
 			return status;
 		else if(status < 0)
-			FAIL(-status, , "Postcmd '%s' failed with code %i.", it->data, -status)
+			FAIL(-status, , "Postcmd '%s' failed with code %i.", (char *)it->data, -status)
 	}
 	
 	step(d);

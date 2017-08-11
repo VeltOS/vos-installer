@@ -5,6 +5,14 @@
 cmake_minimum_required(VERSION 3.4)
 project(vos-installer)
 
+if(NOT CMAKE_BUILD_TYPE)
+	set(CMAKE_BUILD_TYPE Release)
+endif()
+
+set(CMAKE_C_FLAGS "-Wall -Wextra -DUNUSED=G_GNUC_UNUSED")
+set(CMAKE_C_FLAGS_DEBUG "-g")
+set(CMAKE_C_FLAGS_RELEASE "-O3")
+
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "default install path" FORCE)
 endif()
@@ -18,15 +26,6 @@ add_executable(vos-install-gui
 	page-03-complete.c
 	sd-utils.c
 )
-
-#add_custom_target(build_cmk
-#	WORKING_DIRECTORY /home/aidan/projects/cmk/build
-#	COMMAND make
-#	COMMAND sudo make install > /dev/null
-#)
-#
-#add_dependencies(vos-install-gui build_cmk)
-
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUDEV REQUIRED libudev)

@@ -135,7 +135,6 @@ static void page_profile_init(PageProfile *self)
 
 static void on_dispose(GObject *self_)
 {
-	PageProfile *self = PAGE_PROFILE(self_);
 	G_OBJECT_CLASS(page_profile_parent_class)->dispose(self_);
 }
 
@@ -262,10 +261,10 @@ static const gchar * validate_username(const gchar *username)
 	return NULL;
 }
 
-static gboolean validate_input(PageProfile *self, CmkTextfield *caller)
+static gboolean validate_input(PageProfile *self, UNUSED CmkTextfield *caller)
 {
 	const gchar *hostname = cmk_textfield_get_text(self->hostname);
-	const gchar *validateHostname = validate_username(hostname);
+	const gchar *validateHostname = validate_hostname(hostname);
 	if(strlen(hostname) == 0)
 		cmk_textfield_set_error(self->hostname, NULL);
 	else

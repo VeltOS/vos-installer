@@ -22,7 +22,6 @@ struct _PageComplete
 static PageComplete *pageComplete = NULL;
 GSubprocess *gInstallerProc = NULL;
 
-static void on_dispose(GObject *self_);
 static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, ClutterAllocationFlags flags);
 static void on_next_button_activate(PageComplete *self);
 
@@ -35,7 +34,6 @@ CmkWidget * page_complete_new(void)
 
 static void page_complete_class_init(PageCompleteClass *class)
 {
-	//G_OBJECT_CLASS(class)->dispose = on_dispose;
 	CLUTTER_ACTOR_CLASS(class)->allocate = on_allocate;
 }
 
@@ -153,9 +151,7 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 		proc);
 }
 
-//static const gchar * generate_
-
-static void on_proc_complete(GSubprocess *proc, GAsyncResult *res, gpointer x)
+static void on_proc_complete(GSubprocess *proc, GAsyncResult *res, UNUSED gpointer x)
 {
 	gboolean s = g_subprocess_wait_finish(proc, res, NULL);
 	gInstallerProc = NULL;
@@ -273,7 +269,7 @@ static void on_allocate(ClutterActor *self_, const ClutterActorBox *box, Clutter
 	CLUTTER_ACTOR_CLASS(page_complete_parent_class)->allocate(self_, box, flags );
 }
 
-static void on_next_button_activate(PageComplete *self)
+static void on_next_button_activate(UNUSED PageComplete *self)
 {
 	if(!gInstallerProc)
 	{
