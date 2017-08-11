@@ -921,7 +921,7 @@ static int mount_volume(Data *d)
 	#define TRY_MOUNT(s, t, fs, f, data) { if(mount(s, t, fs, f, data) && errno != EBUSY) FAIL(errno, , "Failed to mount %s/" t, d->mountPath) }
 	TRY_MOUNT("proc", "proc", "proc", MS_NOSUID|MS_NOEXEC|MS_NODEV, "")
 	TRY_MOUNT("sys", "sys", "sysfs", MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_RDONLY, "")
-	mount("efivarfs", "sys/firmware/efi/efivars", "efivarfs", MS_NOSUID|MS_NOEXEC|MS_NODEV, "");
+	int efimnt = mount("efivarfs", "sys/firmware/efi/efivars", "efivarfs", MS_NOSUID|MS_NOEXEC|MS_NODEV, "");
 	TRY_MOUNT("udev", "dev", "devtmpfs", MS_NOSUID, "mode=0755")
 	TRY_MOUNT("devpts", "dev/pts", "devpts", MS_NOSUID|MS_NOEXEC, "gid=5,mode=0620")
 	TRY_MOUNT("shm", "dev/shm", "tmpfs", MS_NOSUID|MS_NODEV, "mode=1777")
@@ -948,7 +948,8 @@ static int mount_volume(Data *d)
 		umount("dev/shm");
 		umount("dev/pts");
 		umount("dev");
-		umount("sys/firmware/efi/efivars");
+		if(efimnt == 0)
+			umount("sys/firmware/efi/efivars");
 		umount("sys");
 		umount("proc");
 	}
