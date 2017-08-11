@@ -726,14 +726,14 @@ static int start(Data *d)
 {
 	println("Checking internet connection...");
 	
-	if(run_shell(0, "ping -c1 8.8.8.8 &>/dev/null"))
+	if(run_shell(0, "curl -s -I --max-time 10 http://google.com > /dev/null 2>&1"))
 	{
 		println("\nPlease connect to the internet to continue the install.");
-		if(run_shell(0, "until ping -c1 8.8.8.8 &>/dev/null; do sleep 1; done"))
+		if(run_shell(0, "until curl -s -I --max-time 20 http://google.com > /dev/null 2>&1; do sleep 1; done"))
 			return 1;
 	}
 	
-	println("Connection to Google DNS available.");
+	println("Connection to google.com available.");
 
 	// Get the PARTUUID of the destination drive before
 	// anything else. If anything it helps validate that
