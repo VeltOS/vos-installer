@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=VeltOS Installer
+Comment=Utility to install VeltOS onto a partition
+Exec=/usr/bin/vos-install-gui
+Icon=velt
+Type=Application
+StartupNotify=false
+Categories=Utility;

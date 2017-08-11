@@ -45,3 +45,4 @@ target_link_libraries(vos-install-gui
 add_subdirectory(cli)
 
 install(TARGETS vos-install-gui DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
+install(FILES vos-installer.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications)
