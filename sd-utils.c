@@ -10,6 +10,7 @@
 #include <libudev.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 typedef struct
 {
@@ -45,23 +46,62 @@ static void add_drive_device(MonitorThreadData *monitor, GArray *drives, struct 
 	if(devType == NULL || strncmp(devType, "partition", 9) != 0)
 		return;
 	
-	const gchar *name = udev_device_get_property_value(dev, "ID_FS_LABEL");
-	if(!name)
-		name = udev_device_get_property_value(dev, "PARTNAME");
-	if(!name)
-		return;
-	
-	StorageDevice sd;
+	StorageDevice sd = {NULL};
 	sd.node = g_strdup(udev_device_get_devnode(dev));
-	sd.name = g_strdup(name);
-	sd.fs = g_strdup(udev_device_get_property_value(dev, "ID_FS_TYPE"));
-	// g_message("adding drive: %s, %s, %s", sd.node, sd.name, sd.fs);
 	
+	// Get size of volume
 	// According to the linux documentation, a sector is always 512 bytes
 	// https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/include/linux/types.h?id=v4.4-rc6#n121
 	const char *sectors = udev_device_get_property_value(dev, "ID_PART_ENTRY_SIZE");
-	long long sizeBytes = strtoll(sectors, NULL, 10) * 512;
-	sd.sizeBytes = sizeBytes;
+	errno = 0;
+	long long llsectors = strtoll(sectors, NULL, 10);
+	if(errno || llsectors <= 0)
+		sd.sizeBytes = 0;
+	else
+		sd.sizeBytes = ((unsigned long long)llsectors * 512ULL);
+	
+	// Get name of volume
+	sd.name = g_strdup(udev_device_get_property_value(dev, "ID_FS_LABEL"));
+	if(!sd.name)
+		sd.name = g_strdup(udev_device_get_property_value(dev, "PARTNAME"));
+	if(!sd.name && sd.sizeBytes != 0)
+	{
+		static const unsigned long long kibi = 1024ULL;
+		static const unsigned long long mebi = kibi*1024ULL;
+		static const unsigned long long gibi = mebi*1024ULL;
+		static const unsigned long long tebi = gibi*1024ULL;
+		double size;
+		const char *magnitude;
+		
+		if(sd.sizeBytes >= tebi) {
+			magnitude = "TiB";
+			size = (double)sd.sizeBytes / (double)tebi;
+		} else if(sd.sizeBytes >= gibi) {
+			magnitude = "GiB";
+			size = (double)sd.sizeBytes / (double)gibi;
+		} else if(sd.sizeBytes >= mebi) {
+			magnitude = "MiB";
+			size = (double)sd.sizeBytes / (double)mebi;
+		} else if(sd.sizeBytes >= kibi) {
+			magnitude = "KiB";
+			size = (double)sd.sizeBytes / (double)kibi;
+		} else {
+			magnitude = "Byte";
+			size = (double)sd.sizeBytes;
+		}
+		
+		char * ssize = g_strdup_printf("%.1f", size);
+		// Remove trailing .0 (or ,0 for some locales)
+		int len = strlen(ssize);
+		if(len >= 2 && (ssize[len-2]=='.' || ssize[len-2]==',') && ssize[len-1] == '0')
+			ssize[len-2] = '\0';
+		sd.name = g_strdup_printf("%s %s Volume", ssize, magnitude);
+	}
+	if(!sd.name)
+		sd.name = g_strdup("Unknown Volume");
+	
+	// Get filesystem info
+	sd.fs = g_strdup(udev_device_get_property_value(dev, "ID_FS_TYPE"));
 	
 	const char *readOnlyStr = udev_device_get_sysattr_value(dev, "ro");
 	sd.readOnly = 0;

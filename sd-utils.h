@@ -16,7 +16,7 @@ typedef struct {
 	char *parent; // Dev path to parent device (eg parent device of '/dev/sda3' is '/dev/sda')
 	char *name; // Human-readable name
 	char *fs; // Filesystem name (ex 'ext4' or 'ntfs')
-	long sizeBytes;
+	unsigned long long sizeBytes;
 	int readOnly;
 	int removable; // True for external devices like USB flash drives.
 	int efi; // True if the partition is probably the EFI System Partition
