@@ -776,26 +776,30 @@ static int start(Data *d)
 		dev = NULL;
 		if(d->refind && installdev && refinddev)
 			break;
-		else if(!d->refind && installdev && refinddev)
+		else if(!d->refind && installdev)
 			break;
 	}
 	
 	if(!installdev)
 		FAIL(1, udev_unref(udev), "Install destination device not found.")
-	if(!refinddev)
-		FAIL(1, udev_unref(udev), "rEFInd destination device not found.")
 	
-	if(g_strcmp0(udev_device_get_property_value(refinddev, "ID_FS_TYPE"), "vfat") != 0)
-		FAIL(1, udev_unref(udev), "Given rEFInd destination device is not formatted as vfat.")
+	if(d->refind)
+	{
+		if(!refinddev)
+			FAIL(1, udev_unref(udev), "rEFInd destination device not found.")
+		
+		if(g_strcmp0(udev_device_get_property_value(refinddev, "ID_FS_TYPE"), "vfat") != 0)
+			FAIL(1, udev_unref(udev), "Given rEFInd destination device is not formatted as vfat.")
 
-	struct udev_device *rfparent = udev_device_get_parent(refinddev);
-	if(!rfparent)
-		FAIL(1, udev_unref(udev), "rEFInd destination device (parent) not found.")
-	
-	const char *removable = udev_device_get_sysattr_value(rfparent, "removable");
-	d->refindExternal = false;
-	if(removable)
-		d->refindExternal = strtol(removable, NULL, 10) ? 1 : 0;
+		struct udev_device *rfparent = udev_device_get_parent(refinddev);
+		if(!rfparent)
+			FAIL(1, udev_unref(udev), "rEFInd destination device (parent) not found.")
+		
+		const char *removable = udev_device_get_sysattr_value(rfparent, "removable");
+		d->refindExternal = false;
+		if(removable)
+			d->refindExternal = strtol(removable, NULL, 10) ? 1 : 0;
+	}
 	
 	d->partuuid = g_strdup(udev_device_get_property_value(installdev, "ID_PART_ENTRY_UUID"));
 	if(!d->partuuid)
