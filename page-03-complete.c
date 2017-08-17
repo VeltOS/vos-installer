@@ -130,7 +130,7 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 		else if(g_str_has_prefix(waiting, "name"))
 			write = g_object_get_data(G_OBJECT(stream), "name");
 		else if(g_str_has_prefix(waiting, "services"))
-			write = "lightdm NetworkManager";
+			write = "lightdm NetworkManager systemd-timesyncd.service";
 		
 		GOutputStream *sin = g_subprocess_get_stdin_pipe(proc);
 		GError *error = NULL;
