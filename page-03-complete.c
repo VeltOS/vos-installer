@@ -113,7 +113,7 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 			// them if we're installing from any VM just in case. Not sure
 			// if there's a way to specifically detect VirtualBox.
 			if(isHypervisor)
-				write = PACKAGE_LIST "virtualbox-guest-utils virtualbox-guest-modules-arch";
+				write = PACKAGE_LIST " virtualbox-guest-utils virtualbox-guest-modules-arch";
 			else
 				write = PACKAGE_LIST;
 		}
