@@ -19,6 +19,9 @@ struct _PageComplete
 	CmkButton *nextButton;
 };
 
+#define PACKAGE_LIST "cheese chromium dconf-editor eog gedit gnome-terminal gnome-calculator graphene-desktop libreoffice lightdm lightdm-gtk-greeter networkmanager noto-fonts paper-gtk-theme-git paper-icon-theme-git rhythmbox sudo totem veltos-config xorg yaourt"
+
+static gboolean isHypervisor = FALSE;
 static PageComplete *pageComplete = NULL;
 GSubprocess *gInstallerProc = NULL;
 
@@ -58,6 +61,8 @@ static void page_complete_init(PageComplete *self)
 	self->nextButton = cmk_button_new_with_text("Abort Install", CMK_BUTTON_TYPE_RAISED);
 	clutter_actor_add_child(CLUTTER_ACTOR(self), CLUTTER_ACTOR(self->nextButton));
 	g_signal_connect_swapped(self->nextButton, "activate", G_CALLBACK(on_next_button_activate), self);
+
+	isHypervisor = (system("grep -q ^flags.*\\ hypervisor /proc/cpuinfo") == 0);
 }
 
 static void write_line(const gchar *line)
@@ -103,8 +108,15 @@ static void on_read_line_async(GDataInputStream *stream, GAsyncResult *res, GSub
 		if(g_str_has_prefix(waiting, "dest"))
 			write = g_object_get_data(G_OBJECT(stream), "destination");
 		else if(g_str_has_prefix(waiting, "packages"))
-			write = "chromium dconf-editor eog gedit gnome-terminal gnome-calculator graphene-desktop lightdm lightdm-gtk-greeter networkmanager noto-fonts paper-gtk-theme-git paper-icon-theme-git veltos-config xorg yaourt"; // TODO: Removed some of the packages because i don't need them for testing
-			//write = "cheese chromium dconf-editor eog gedit gnome-terminal gnome-calculator graphene-desktop libreoffice lightdm lightdm-gtk-greeter networkmanager noto-fonts paper-gtk-theme-git paper-icon-theme-git rhythmbox totem veltos-config xorg yaourt";
+		{
+			// VirtualBox can't run xorg without these modules, so just add
+			// them if we're installing from any VM just in case. Not sure
+			// if there's a way to specifically detect VirtualBox.
+			if(isHypervisor)
+				write = PACKAGE_LIST "virtualbox-guest-utils virtualbox-guest-modules-arch";
+			else
+				write = PACKAGE_LIST;
+		}
 		else if(g_str_has_prefix(waiting, "password"))
 			write = g_object_get_data(G_OBJECT(stream), "password");
 		else if(g_str_has_prefix(waiting, "locale"))
